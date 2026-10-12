@@ -20,9 +20,12 @@ import {
   docKey,
   getByEscapedPath,
   isDollarDate,
-  unescapeSegment,
+  isFieldIndexed,
   unwrapScalar,
 } from '@/lib/astra/schema';
+import type { CollectionCapabilities } from '@/lib/astra/gateway';
+import { cycleSort, displayPath } from '@/lib/query/compile';
+import type { SortKey } from '@/lib/query/types';
 import { type ColumnLayout, loadLayout, saveLayout } from '@/lib/ui/columnLayout';
 
 type Doc = Record<string, unknown>;
@@ -31,6 +34,15 @@ interface ResultsGridProps {
   documents: Doc[];
   keyspace: string;
   collection: string;
+  /** Active sort keys (priority order). Sorting is server-side (`manualSorting`). */
+  sort: SortKey[];
+  /**
+   * Called with the next sort after a header click. Reusable by a local (browser-side)
+   * sort for search modes later: the grid only reports intent, it never sorts rows.
+   */
+  onSortChange: (sort: SortKey[]) => void;
+  /** The collection's `indexing` option; non-indexed fields can't be sorted. */
+  indexing?: CollectionCapabilities['indexing'];
   /** Called with the clicked row's document. */
   onRowClick?: (doc: Doc) => void;
   /** `docKey` of the row currently shown in the detail panel (highlighted). */
@@ -45,6 +57,8 @@ interface ColumnUiInfo {
   expandable: boolean;
   /** Set on the first sub-column of an expanded object: the parent path to collapse. */
   collapseParent?: string;
+  /** Why this column can't be sorted (shown as a tooltip), or null when sortable. */
+  sortBlockedReason: string | null;
 }
 
 const ROW_HEIGHT = 36;
@@ -55,6 +69,7 @@ const MAX_CELL_CHARS = 40;
 const MAX_TOOLTIP_CHARS = 2000;
 const ID_COLUMN = '_id';
 const VECTOR_COLUMN = '$vector';
+const VECTORIZE_COLUMN = '$vectorize';
 const COLUMN_PINNING = { left: [ID_COLUMN] };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -110,10 +125,23 @@ interface BuiltColumns {
   ui: Map<string, ColumnUiInfo>;
 }
 
+function sortBlockedReason(
+  field: FieldInfo,
+  indexing: CollectionCapabilities['indexing'] | undefined,
+): string | null {
+  if (field.escapedPath === VECTOR_COLUMN || field.escapedPath === VECTORIZE_COLUMN) {
+    return "Vectors can't be sorted";
+  }
+  if (field.type === 'object' || field.type === 'array') return "Objects/arrays can't be sorted";
+  if (!isFieldIndexed(field.escapedPath, indexing)) return 'Not indexed';
+  return null;
+}
+
 function buildColumns(
   fields: FieldInfo[],
   expanded: ReadonlySet<string>,
   onToggleExpand: (escapedPath: string) => void,
+  indexing: CollectionCapabilities['indexing'] | undefined,
 ): BuiltColumns {
   const children = new Map<string, FieldInfo[]>();
   const topLevel: FieldInfo[] = [];
@@ -141,11 +169,13 @@ function buildColumns(
 
     const expandable = subFields.length > 0;
     const id = field.escapedPath;
+    const blocked = sortBlockedReason(field, indexing);
     ids.push(id);
-    ui.set(id, { expandable, collapseParent });
+    ui.set(id, { expandable, collapseParent, sortBlockedReason: blocked });
     columns.push({
       id,
       header: field.path,
+      enableSorting: blocked === null,
       accessorFn: (row: Doc) => getByEscapedPath(row, id),
       size: id === ID_COLUMN ? ID_COL_WIDTH : COL_WIDTH,
       minSize: MIN_COL_WIDTH,
@@ -221,6 +251,8 @@ interface GridTableProps {
   onRowClick?: (doc: Doc) => void;
   onToggleExpand: (escapedPath: string) => void;
   onReorder: (fromId: string, toId: string) => void;
+  /** Header click; `additive` is true for Shift-click. Never called for blocked columns. */
+  onHeaderSort: (columnId: string, additive: boolean) => void;
 }
 
 function GridTable({
@@ -230,6 +262,7 @@ function GridTable({
   onRowClick,
   onToggleExpand,
   onReorder,
+  onHeaderSort,
 }: GridTableProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
@@ -259,6 +292,7 @@ function GridTable({
   }, []);
 
   const headerGroups = table.getHeaderGroups();
+  const sortCount = table.getState().sorting.length;
 
   return (
     <div
@@ -278,10 +312,23 @@ function GridTable({
                 const pinned = column.getIsPinned() === 'left';
                 const info = ui.get(column.id);
                 const collapseParent = info?.collapseParent;
+                const blockedReason = info?.sortBlockedReason ?? null;
+                const sortDir = column.getIsSorted();
+                const sortIndex = column.getSortIndex();
                 const isDropTarget = dragOverId === column.id && draggingId !== column.id;
+                const dragHint = pinned ? '' : ' · Drag to reorder';
+                const sortTitle =
+                  blockedReason ??
+                  `Click to sort (asc → desc → off) · Shift-click to add a secondary sort${dragHint}`;
+                const triggerSort = (e: { shiftKey: boolean }) => {
+                  if (blockedReason === null) onHeaderSort(column.id, e.shiftKey);
+                };
                 return (
                   <th
                     key={header.id}
+                    aria-sort={
+                      sortDir === 'asc' ? 'ascending' : sortDir === 'desc' ? 'descending' : 'none'
+                    }
                     className="pl-3 pr-2 text-left font-medium text-xs uppercase tracking-wider border-b border-r"
                     style={{
                       display: 'flex',
@@ -316,9 +363,23 @@ function GridTable({
                     }
                   >
                     <div
-                      className={`min-w-0 flex-1 truncate ${pinned ? '' : 'cursor-grab'}`}
+                      role="button"
+                      tabIndex={0}
+                      aria-disabled={blockedReason !== null}
+                      className={`min-w-0 flex-1 flex items-center gap-1 select-none ${
+                        blockedReason !== null
+                          ? 'cursor-not-allowed opacity-50'
+                          : 'cursor-pointer'
+                      }`}
                       draggable={!pinned}
-                      title={pinned ? undefined : 'Drag to reorder'}
+                      title={sortTitle}
+                      onClick={triggerSort}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          triggerSort(e);
+                        }
+                      }}
                       onDragStart={(e) => {
                         e.dataTransfer.effectAllowed = 'move';
                         e.dataTransfer.setData('text/plain', column.id);
@@ -329,7 +390,19 @@ function GridTable({
                         setDragOverId(null);
                       }}
                     >
-                      {flexRender(column.columnDef.header, header.getContext())}
+                      <span className="truncate">
+                        {flexRender(column.columnDef.header, header.getContext())}
+                      </span>
+                      {sortDir !== false && (
+                        <span
+                          className="shrink-0 normal-case"
+                          style={{ color: 'var(--astra-accent)' }}
+                          aria-hidden="true"
+                        >
+                          {sortDir === 'asc' ? '▲' : '▼'}
+                          {sortCount > 1 ? sortIndex + 1 : ''}
+                        </span>
+                      )}
                     </div>
                     {info?.expandable && (
                       <button
@@ -348,8 +421,8 @@ function GridTable({
                         type="button"
                         className="ml-1 shrink-0 rounded px-1"
                         style={{ color: 'var(--astra-accent)' }}
-                        title={`Collapse ${unescapeSegment(collapseParent)}`}
-                        aria-label={`Collapse ${unescapeSegment(collapseParent)}`}
+                        title={`Collapse ${displayPath(collapseParent)}`}
+                        aria-label={`Collapse ${displayPath(collapseParent)}`}
                         onClick={() => onToggleExpand(collapseParent)}
                       >
                         ⤡
@@ -516,6 +589,9 @@ export default function ResultsGrid({
   documents,
   keyspace,
   collection,
+  sort,
+  onSortChange,
+  indexing,
   onRowClick,
   selectedKey = null,
   onShowVectorChange,
@@ -546,8 +622,13 @@ export default function ResultsGrid({
   }, []);
 
   const built = useMemo(
-    () => buildColumns(fields, expanded, toggleExpand),
-    [fields, expanded, toggleExpand],
+    () => buildColumns(fields, expanded, toggleExpand, indexing),
+    [fields, expanded, toggleExpand, indexing],
+  );
+
+  const sorting = useMemo(
+    () => sort.map((k) => ({ id: k.field, desc: k.dir === 'desc' })),
+    [sort],
   );
 
   const columnOrder = useMemo(
@@ -560,9 +641,12 @@ export default function ResultsGrid({
     data: documents,
     columns: built.columns,
     getCoreRowModel: getCoreRowModel(),
+    // Sorting happens on the server; the grid only displays it and reports header clicks.
+    manualSorting: true,
     enableColumnResizing: true,
     columnResizeMode: 'onChange',
     state: {
+      sorting,
       columnPinning: COLUMN_PINNING,
       columnVisibility: layout.columnVisibility,
       columnOrder,
@@ -584,6 +668,10 @@ export default function ResultsGrid({
         columnSizing: functionalUpdate(updater, prev.columnSizing),
       })),
   });
+
+  const handleHeaderSort = (columnId: string, additive: boolean) => {
+    onSortChange(cycleSort(sort, columnId, additive));
+  };
 
   const reorder = (fromId: string, toId: string) => {
     if (fromId === toId) return;
@@ -643,6 +731,7 @@ export default function ResultsGrid({
           onRowClick={onRowClick}
           onToggleExpand={toggleExpand}
           onReorder={reorder}
+          onHeaderSort={handleHeaderSort}
         />
       ) : (
         <pre

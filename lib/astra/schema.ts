@@ -4,6 +4,11 @@
  */
 
 import type { CollectionDefinition, CollectionCapabilities } from './gateway';
+import {
+  escapeFieldSegment,
+  splitEscapedPath,
+  unescapeFieldSegment,
+} from '@/lib/query/compile';
 
 /**
  * Derive a normalized capability summary from raw collection definition.
@@ -22,7 +27,40 @@ export function parseCapabilities(definition: CollectionDefinition): CollectionC
     vectorizeModel: vectorService?.modelName ?? null,
     hasLexical: !!definition.lexical?.enabled,
     hasRerank: !!rerank?.enabled,
+    indexing: parseIndexing(definition.indexing),
   };
+}
+
+/** Normalizes the collection's `indexing` option to `{ allow } | { deny } | null`. */
+function parseIndexing(indexing: unknown): CollectionCapabilities['indexing'] {
+  if (typeof indexing !== 'object' || indexing === null) return null;
+  const { allow, deny } = indexing as { allow?: unknown; deny?: unknown };
+  const strings = (value: unknown): string[] | null =>
+    Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : null;
+  const denyList = strings(deny);
+  if (denyList) return { deny: denyList };
+  const allowList = strings(allow);
+  if (allowList) return { allow: allowList };
+  return null;
+}
+
+/**
+ * Whether a field is indexed (and therefore sortable/filterable) given the
+ * collection's `indexing` options. `path` is an escaped dotted path.
+ *  - `deny` set: indexed unless the field or a parent path is denied (`"*"` denies all).
+ *  - `allow` set: indexed only if the field or a parent path is allowed (`"*"` allows all).
+ *  - neither: indexed.
+ */
+export function isFieldIndexed(
+  path: string,
+  indexing: CollectionCapabilities['indexing'] | undefined,
+): boolean {
+  if (!indexing) return true;
+  const segments = splitEscapedPath(path);
+  const ancestors = new Set<string>(['*']);
+  for (let i = 1; i <= segments.length; i++) ancestors.add(segments.slice(0, i).join('.'));
+  if ('deny' in indexing) return !indexing.deny.some((p) => ancestors.has(p));
+  return indexing.allow.some((p) => ancestors.has(p));
 }
 
 /**
@@ -61,7 +99,10 @@ export type FieldType =
 export type FieldInfo = {
   /** Dotted path as shown to users, e.g. `address.city`. */
   path: string;
-  /** Dotted path where `.` and `&` inside key names are escaped (for filter/sort use). */
+  /**
+   * Dotted path where `.` and `&` inside key names are escaped the Data API way
+   * (`.` -> `&.`, `&` -> `&&`; see `lib/query/compile.ts`). Used for filter/sort.
+   */
   escapedPath: string;
   type: FieldType;
   isNested: boolean;
@@ -107,23 +148,18 @@ function inferType(value: unknown): FieldType {
   if (typeof value === 'number') return 'number';
   if (typeof value === 'boolean') return 'boolean';
   if (isDollarDate(value)) return 'dollarDate';
+  // `{ $uuid: "…" }`-style wrappers are scalars, typed by their inner value.
+  const scalar = unwrapScalar(value);
+  if (scalar !== value) return inferType(scalar);
   return 'object';
-}
-
-function escapeSegment(segment: string): string {
-  return segment.replaceAll('.', '\\u002e').replaceAll('&', '\\u0026');
-}
-
-export function unescapeSegment(segment: string): string {
-  return segment.replaceAll('\\u002e', '.').replaceAll('\\u0026', '&');
 }
 
 /** Reads a value from a document using a dotted path produced by `escapedPath`. */
 export function getByEscapedPath(doc: Record<string, unknown>, escapedPath: string): unknown {
   let current: unknown = doc;
-  for (const segment of escapedPath.split('.')) {
+  for (const segment of splitEscapedPath(escapedPath)) {
     if (!isPlainObject(current)) return undefined;
-    current = current[unescapeSegment(segment)];
+    current = current[unescapeFieldSegment(segment)];
   }
   return current;
 }
@@ -137,7 +173,7 @@ export function deriveFields(documents: Record<string, unknown>[]): FieldInfo[] 
   const seen = new Map<string, { path: string; types: Set<FieldType>; isNested: boolean }>();
 
   const visit = (segments: string[], value: unknown): void => {
-    const escapedPath = segments.map(escapeSegment).join('.');
+    const escapedPath = segments.map(escapeFieldSegment).join('.');
     const type = inferType(value);
     const entry = seen.get(escapedPath) ?? {
       path: segments.join('.'),

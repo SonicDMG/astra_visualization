@@ -33,7 +33,9 @@ export const configError: string | null = validateConfig();
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-import type { QuerySpec } from '@/lib/query/types';
+import { parseCapabilities } from '@/lib/astra/schema';
+import { compileSort } from '@/lib/query/compile';
+import { type QuerySpec, SORT_MAX_DOCUMENTS } from '@/lib/query/types';
 
 // Import SDK types for compatibility
 import type {
@@ -89,6 +91,8 @@ export interface CollectionCapabilities {
   vectorizeModel: string | null;
   hasLexical: boolean;
   hasRerank: boolean;
+  /** Collection `indexing` option; null = everything indexed. */
+  indexing: { allow: string[] } | { deny: string[] } | null;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -178,29 +182,18 @@ export async function listTables(
   }
 }
 
-// Re-export the parseCapabilities function for the schema module
-export function parseCapabilities(definition: CollectionDefinition): CollectionCapabilities {
-  const vector = definition.vector;
-  const vectorService = vector?.service;
-  const rerank = definition.rerank;
-
-  return {
-    hasVector: !!vector,
-    vectorDimension: vector?.dimension ?? null,
-    vectorMetric: vector?.metric ?? null,
-    vectorizeProvider: vectorService?.provider ?? null,
-    vectorizeModel: vectorService?.modelName ?? null,
-    hasLexical: !!definition.lexical?.enabled,
-    hasRerank: !!rerank?.enabled,
-  };
-}
-
 // ─── Query / count ──────────────────────────────────────────────────────────
+
+/** Typed error: a readable message plus a stable machine-readable code. */
+export type ApiError = { error: string; errorCode: string };
 
 export type QueryResult = {
   documents: Record<string, unknown>[];
   nextPageState: string | null;
+  /** More documents exist after this page (heuristic for sorted queries). */
+  hasNextPage: boolean;
   error?: string;
+  errorCode?: string;
 };
 
 export type CountResult = {
@@ -215,41 +208,98 @@ export type QueryOptions = {
   projection?: Record<string, 0 | 1>;
 };
 
+const SORT_ROW_LIMIT_MESSAGE =
+  'Too many documents match to sort (limit 10,000). Narrow your filter or remove the sort.';
+
+/**
+ * The Data API reports failures as HTTP 200 with `errors[]`. Maps the first
+ * descriptor to a typed error; known codes get a friendlier message.
+ */
+export function mapDataApiErrors(
+  errors: ReadonlyArray<{ errorCode?: string; message?: string }> | undefined,
+): ApiError | null {
+  const first = errors?.[0];
+  if (!first) return null;
+  const errorCode = first.errorCode ?? 'UNKNOWN';
+  if (errorCode === 'OVERLOADED_SORT_ROW_LIMIT') {
+    return { error: SORT_ROW_LIMIT_MESSAGE, errorCode };
+  }
+  return { error: first.message ?? `Data API error ${errorCode}`, errorCode };
+}
+
+/** Converts anything thrown by the SDK into a typed error (generic fallback `QUERY_FAILED`). */
+async function toApiError(err: unknown, prefix: string): Promise<ApiError> {
+  const { DataAPIResponseError } = await import('@datastax/astra-db-ts');
+  if (err instanceof DataAPIResponseError) {
+    const mapped = mapDataApiErrors(err.errorDescriptors);
+    if (mapped) return mapped;
+  }
+  const message = err instanceof Error ? err.message : 'Unknown error';
+  return { error: `${prefix}: ${message}`, errorCode: 'QUERY_FAILED' };
+}
+
 /**
  * Browse-mode query. Uses the raw `find` command (via `db.command`) rather than
  * the cursor API so that `nextPageState` can be returned across stateless requests.
- * Sort / filter / search are wired in later phases.
+ *
+ * Unsorted: pages with `pageState`. Sorted: pages with `skip`/`limit` — the Data API
+ * rejects `pageState` together with `sort` and returns no `nextPageState`, and only
+ * sorts the first {@link SORT_MAX_DOCUMENTS} matching documents.
+ * Filter / search are wired in later phases.
  */
 export async function query(spec: QuerySpec, options: QueryOptions = {}): Promise<QueryResult> {
+  const sorted = spec.sort.length > 0;
+  const skip = spec.pageIndex * spec.pageSize;
+
+  if (sorted && skip + spec.pageSize > SORT_MAX_DOCUMENTS) {
+    return {
+      documents: [],
+      nextPageState: null,
+      hasNextPage: false,
+      errorCode: 'SORT_PAGE_BEYOND_LIMIT',
+      error: `Sorted results are limited to the first ${SORT_MAX_DOCUMENTS.toLocaleString('en-US')} documents. Go to an earlier page or narrow your filter.`,
+    };
+  }
+
   try {
     const { DataAPIClient } = await import('@datastax/astra-db-ts');
     const client = new DataAPIClient(TOKEN);
     const db = client.db(ENDPOINT, { keyspace: spec.keyspace });
 
+    const findOptions: Record<string, unknown> = sorted
+      ? { limit: spec.pageSize, skip }
+      : { limit: spec.pageSize, pageState: spec.pageState ?? undefined };
+
     const response = await db.command(
       {
         find: {
           filter: {},
+          ...(sorted ? { sort: compileSort(spec.sort) } : {}),
           projection: options.projection ?? { $vector: 0 },
-          options: {
-            limit: spec.pageSize,
-            pageState: spec.pageState ?? undefined,
-          },
+          options: findOptions,
         },
       },
       { collection: spec.collection },
     );
 
+    const apiError = mapDataApiErrors(response.errors);
+    if (apiError) {
+      return { documents: [], nextPageState: null, hasNextPage: false, ...apiError };
+    }
+
     const data = response.data as
       | { documents?: Record<string, unknown>[]; nextPageState?: string | null }
       | undefined;
+    const documents = data?.documents ?? [];
+    const nextPageState = sorted ? null : (data?.nextPageState ?? null);
     return {
-      documents: data?.documents ?? [],
-      nextPageState: data?.nextPageState ?? null,
+      documents,
+      nextPageState,
+      hasNextPage: sorted ? documents.length === spec.pageSize : nextPageState !== null,
     };
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown error';
-    return { documents: [], nextPageState: null, error: `Failed to query collection: ${message}` };
+    const apiError = await toApiError(err, 'Failed to query collection');
+    return { documents: [], nextPageState: null, hasNextPage: false, ...apiError };
   }
 }
 
