@@ -2,17 +2,20 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import FilterBuilder from '@/components/FilterBuilder';
 import ResultsGrid from '@/components/ResultsGrid';
 import RowDetailPanel from '@/components/RowDetailPanel';
 import type { CollectionCapabilities } from '@/lib/astra/gateway';
-import { docKey } from '@/lib/astra/schema';
+import { deriveFields, docKey } from '@/lib/astra/schema';
 import { displayPath } from '@/lib/query/compile';
 import { loadLayout } from '@/lib/ui/columnLayout';
 import {
+  type FilterTree,
   type PageSize,
   type QuerySpec,
   type SortKey,
   SORT_MAX_DOCUMENTS,
+  defaultFilterTree,
   querySpecFromUrlParams,
   querySpecToUrlParams,
 } from '@/lib/query/types';
@@ -106,6 +109,7 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
   const [showVector, setShowVector] = useState(
     () => loadLayout(keyspace, collection).columnVisibility.$vector === true,
   );
+  const [isFilterOpen, setIsFilterOpen] = useState(false);
   // pageIndex -> pageState used to load that page, so Previous can step back.
   const pageStateHistory = useRef<Map<number, string | null>>(new Map());
 
@@ -140,15 +144,22 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     };
   }, [keyspace, collection]);
 
+  const fieldTypesParam = useMemo(() => {
+    if (documents.length === 0) return '';
+    const fields = deriveFields(documents);
+    const map = Object.fromEntries(fields.map((f) => [f.escapedPath, f.type]));
+    return `&ft=${encodeURIComponent(JSON.stringify(map))}`;
+  }, [documents]);
+
   useEffect(() => {
     let cancelled = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
     Promise.all([
       fetchJson<{ documents: Doc[]; nextPageState: string | null; hasNextPage: boolean }>(
-        `/api/query?${specQuery}${showVector ? '&sv=1' : ''}`,
+        `/api/query?${specQuery}${showVector ? '&sv=1' : ''}${fieldTypesParam}`,
       ),
-      fetchJson<CountInfo>(`/api/count?${specQuery}`),
+      fetchJson<CountInfo>(`/api/count?${specQuery}${fieldTypesParam}`),
     ])
       .then(([q, c]) => {
         if (cancelled) return;
@@ -172,13 +183,20 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     return () => {
       cancelled = true;
     };
-  }, [specQuery, refreshToken, showVector]);
+  }, [specQuery, refreshToken, showVector, fieldTypesParam]);
 
   const updateSpec = useCallback(
     (next: QuerySpec) => {
       router.push(`/?${querySpecToUrlParams(next).toString()}`);
     },
     [router],
+  );
+
+  const applyFilter = useCallback(
+    (filter: FilterTree) => {
+      updateSpec({ ...spec, filter, pageState: null, pageIndex: 0 });
+    },
+    [spec, updateSpec],
   );
 
   const goNext = () => {
@@ -223,6 +241,16 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     Math.max(countPages, spec.pageIndex + 1 + (hasNextPage ? 1 : 0)),
   ) - 1;
   const canNextSorted = hasNextPage && spec.pageIndex + 1 < maxPages;
+
+  const filterCount = useMemo(() => {
+    if (!spec.filter || !Array.isArray(spec.filter.children)) return 0;
+    let count = 0;
+    for (const child of spec.filter.children) {
+      if (child.kind === 'condition') count++;
+      else if (child.kind === 'group') count += child.children.length;
+    }
+    return count;
+  }, [spec.filter]);
 
   const handleRowClick = useCallback((doc: Doc) => {
     // Clicking the open row again closes the panel.
@@ -295,7 +323,47 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
         </div>
       )}
 
+      {filterCount > 0 && !isFilterOpen && (
+        <div
+          className="flex items-center gap-2 flex-wrap text-xs"
+          style={{ color: 'var(--astra-muted)' }}
+        >
+          <span>
+            Filtered ({filterCount} condition{filterCount > 1 ? 's' : ''})
+          </span>
+          <button
+            type="button"
+            className={buttonClass}
+            style={buttonStyle}
+            onClick={() => setIsFilterOpen(true)}
+          >
+            Edit filter
+          </button>
+          <button
+            type="button"
+            className={buttonClass}
+            style={buttonStyle}
+            onClick={() => applyFilter(defaultFilterTree())}
+          >
+            Clear filter
+          </button>
+        </div>
+      )}
+
       <div className="flex items-center gap-3 flex-wrap text-xs" style={{ color: 'var(--astra-muted)' }}>
+        <button
+          type="button"
+          className={buttonClass}
+          style={{
+            ...buttonStyle,
+            ...(isFilterOpen || filterCount > 0
+              ? { borderColor: 'var(--astra-accent)', color: 'var(--astra-text)' }
+              : {}),
+          }}
+          onClick={() => setIsFilterOpen((prev) => !prev)}
+        >
+          Filters{filterCount > 0 ? ` (${filterCount})` : ''}
+        </button>
         {sorted ? (
           <nav className="flex items-center gap-1" aria-label="Sorted results pages">
             <button
@@ -409,6 +477,17 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
         {countInfo && <span>{formatCount(countInfo)}</span>}
         {loading && <Spinner />}
       </div>
+
+      {isFilterOpen && (
+        <FilterBuilder
+          key={JSON.stringify(spec.filter)}
+          documents={documents}
+          appliedFilter={spec.filter}
+          indexing={indexing}
+          onApply={applyFilter}
+          onClose={() => setIsFilterOpen(false)}
+        />
+      )}
 
       <ResultsGrid
         documents={documents}

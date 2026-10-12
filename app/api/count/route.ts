@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { count } from '@/lib/astra/gateway';
 import { querySpecFromUrlParams } from '@/lib/query/types';
+import { validateFilter } from '@/lib/query/compile';
+import type { FieldType } from '@/lib/astra/schema';
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const params = request.nextUrl.searchParams;
@@ -14,7 +16,30 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  const result = await count(querySpecFromUrlParams(params, keyspace, collection));
+  const spec = querySpecFromUrlParams(params, keyspace, collection);
+
+  const filterIssues = validateFilter(spec.filter);
+  if (filterIssues.length > 0) {
+    return NextResponse.json(
+      {
+        error: filterIssues.map((i) => i.message).join('; '),
+        errorCode: filterIssues[0].code,
+      },
+      { status: 400 },
+    );
+  }
+
+  let fieldTypes: Record<string, FieldType> | undefined;
+  const ftRaw = params.get('ft');
+  if (ftRaw) {
+    try {
+      fieldTypes = JSON.parse(ftRaw);
+    } catch {
+      // Ignored: lenient parsing falls back to standard types
+    }
+  }
+
+  const result = await count(spec, { fieldTypes });
   if (result.error) {
     return NextResponse.json({ error: result.error }, { status: 500 });
   }

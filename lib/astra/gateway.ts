@@ -33,8 +33,8 @@ export const configError: string | null = validateConfig();
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-import { parseCapabilities } from '@/lib/astra/schema';
-import { compileSort } from '@/lib/query/compile';
+import { parseCapabilities, type FieldType } from '@/lib/astra/schema';
+import { compileFilter, compileSort } from '@/lib/query/compile';
 import { type QuerySpec, SORT_MAX_DOCUMENTS } from '@/lib/query/types';
 
 // Import SDK types for compatibility
@@ -206,6 +206,8 @@ export type CountResult = {
 export type QueryOptions = {
   /** Data API projection. Defaults to `{ $vector: 0 }` (vector hidden). */
   projection?: Record<string, 0 | 1>;
+  /** Inferred field types (used e.g. for dollarDate conversion). */
+  fieldTypes?: Record<string, FieldType>;
 };
 
 const SORT_ROW_LIMIT_MESSAGE =
@@ -270,10 +272,12 @@ export async function query(spec: QuerySpec, options: QueryOptions = {}): Promis
       ? { limit: spec.pageSize, skip }
       : { limit: spec.pageSize, pageState: spec.pageState ?? undefined };
 
+    const filterDoc = compileFilter(spec.filter, options.fieldTypes);
+
     const response = await db.command(
       {
         find: {
-          filter: {},
+          filter: filterDoc,
           ...(sorted ? { sort: compileSort(spec.sort) } : {}),
           projection: options.projection ?? { $vector: 0 },
           options: findOptions,
@@ -303,12 +307,45 @@ export async function query(spec: QuerySpec, options: QueryOptions = {}): Promis
   }
 }
 
-/** Browse-mode count (no filter in Phase 3), so the estimate is always used. */
-export async function count(spec: QuerySpec): Promise<CountResult> {
+/**
+ * Count documents matching the spec.
+ * Uses exact `countDocuments` with upperBound=1000 when a filter is present,
+ * or fast `estimatedDocumentCount` when unfiltered.
+ */
+export async function count(
+  spec: QuerySpec,
+  options?: { fieldTypes?: Record<string, FieldType> },
+): Promise<CountResult> {
   try {
     const { DataAPIClient } = await import('@datastax/astra-db-ts');
     const client = new DataAPIClient(TOKEN);
     const db = client.db(ENDPOINT, { keyspace: spec.keyspace });
+
+    const hasFilter = spec.filter && spec.filter.children.length > 0;
+    if (hasFilter) {
+      const filterDoc = compileFilter(spec.filter, options?.fieldTypes);
+      const response = await db.command(
+        {
+          countDocuments: {
+            filter: filterDoc,
+            options: { upperBound: 1000 },
+          },
+        },
+        { collection: spec.collection },
+      );
+
+      const apiError = mapDataApiErrors(response.errors);
+      if (apiError) {
+        return { count: 0, isEstimate: false, isOver1000: false, error: apiError.error };
+      }
+
+      const status = response.status as { count?: number; moreData?: boolean } | undefined;
+      return {
+        count: status?.count ?? 0,
+        isEstimate: false,
+        isOver1000: status?.moreData ?? false,
+      };
+    }
 
     const n = await db.collection(spec.collection).estimatedDocumentCount();
     return { count: n, isEstimate: true, isOver1000: false };
