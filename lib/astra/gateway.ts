@@ -210,12 +210,17 @@ export type CountResult = {
   error?: string;
 };
 
+export type QueryOptions = {
+  /** Data API projection. Defaults to `{ $vector: 0 }` (vector hidden). */
+  projection?: Record<string, 0 | 1>;
+};
+
 /**
  * Browse-mode query. Uses the raw `find` command (via `db.command`) rather than
  * the cursor API so that `nextPageState` can be returned across stateless requests.
  * Sort / filter / search are wired in later phases.
  */
-export async function query(spec: QuerySpec): Promise<QueryResult> {
+export async function query(spec: QuerySpec, options: QueryOptions = {}): Promise<QueryResult> {
   try {
     const { DataAPIClient } = await import('@datastax/astra-db-ts');
     const client = new DataAPIClient(TOKEN);
@@ -225,7 +230,7 @@ export async function query(spec: QuerySpec): Promise<QueryResult> {
       {
         find: {
           filter: {},
-          projection: { $vector: 0 },
+          projection: options.projection ?? { $vector: 0 },
           options: {
             limit: spec.pageSize,
             pageState: spec.pageState ?? undefined,

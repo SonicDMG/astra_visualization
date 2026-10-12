@@ -44,3 +44,137 @@ export function vectorizeLabel(caps: CollectionCapabilities): string | null {
   if (!caps.vectorizeProvider || !caps.vectorizeModel) return null;
   return `${caps.vectorizeProvider}/${caps.vectorizeModel}`;
 }
+
+// ─── Field inference ────────────────────────────────────────────────────────
+
+export type FieldType =
+  | 'string'
+  | 'number'
+  | 'boolean'
+  | 'array'
+  | 'object'
+  | 'null'
+  | 'isoDate'
+  | 'dollarDate'
+  | 'mixed';
+
+export type FieldInfo = {
+  /** Dotted path as shown to users, e.g. `address.city`. */
+  path: string;
+  /** Dotted path where `.` and `&` inside key names are escaped (for filter/sort use). */
+  escapedPath: string;
+  type: FieldType;
+  isNested: boolean;
+};
+
+/** Maximum number of path segments walked (`a.b.c`). */
+const MAX_FIELD_DEPTH = 3;
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}/;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Extended-JSON date: `{ $date: <epoch millis> }`. */
+export function isDollarDate(value: unknown): value is { $date: number } {
+  return isPlainObject(value) && typeof value.$date === 'number';
+}
+
+/** Extended-JSON scalar wrapper such as `{ $uuid: "…" }`; treated as an opaque leaf. */
+function isOpaqueWrapper(value: Record<string, unknown>): boolean {
+  const keys = Object.keys(value);
+  return keys.length === 1 && keys[0].startsWith('$');
+}
+
+/**
+ * Unwraps extended-JSON scalars (`{ $uuid: "…" }`, `{ $objectId: "…" }`) to their
+ * inner primitive for display. Any other value is returned unchanged.
+ */
+export function unwrapScalar(value: unknown): unknown {
+  if (isPlainObject(value) && isOpaqueWrapper(value)) {
+    const inner = Object.values(value)[0];
+    if (typeof inner === 'string' || typeof inner === 'number' || typeof inner === 'boolean') {
+      return inner;
+    }
+  }
+  return value;
+}
+
+function inferType(value: unknown): FieldType {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  if (typeof value === 'string') return ISO_DATE_PATTERN.test(value) ? 'isoDate' : 'string';
+  if (typeof value === 'number') return 'number';
+  if (typeof value === 'boolean') return 'boolean';
+  if (isDollarDate(value)) return 'dollarDate';
+  return 'object';
+}
+
+function escapeSegment(segment: string): string {
+  return segment.replaceAll('.', '\\u002e').replaceAll('&', '\\u0026');
+}
+
+export function unescapeSegment(segment: string): string {
+  return segment.replaceAll('\\u002e', '.').replaceAll('\\u0026', '&');
+}
+
+/** Reads a value from a document using a dotted path produced by `escapedPath`. */
+export function getByEscapedPath(doc: Record<string, unknown>, escapedPath: string): unknown {
+  let current: unknown = doc;
+  for (const segment of escapedPath.split('.')) {
+    if (!isPlainObject(current)) return undefined;
+    current = current[unescapeSegment(segment)];
+  }
+  return current;
+}
+
+/**
+ * Derives field metadata from a set of documents. Nested object keys are
+ * included as dotted paths up to {@link MAX_FIELD_DEPTH} levels deep.
+ * Result is sorted with `_id` first, then alphabetically by path.
+ */
+export function deriveFields(documents: Record<string, unknown>[]): FieldInfo[] {
+  const seen = new Map<string, { path: string; types: Set<FieldType>; isNested: boolean }>();
+
+  const visit = (segments: string[], value: unknown): void => {
+    const escapedPath = segments.map(escapeSegment).join('.');
+    const type = inferType(value);
+    const entry = seen.get(escapedPath) ?? {
+      path: segments.join('.'),
+      types: new Set<FieldType>(),
+      isNested: segments.length > 1,
+    };
+    entry.types.add(type);
+    seen.set(escapedPath, entry);
+
+    if (type === 'object' && segments.length < MAX_FIELD_DEPTH && isPlainObject(value)) {
+      if (isOpaqueWrapper(value)) return;
+      for (const [key, child] of Object.entries(value)) visit([...segments, key], child);
+    }
+  };
+
+  for (const doc of documents) {
+    for (const [key, value] of Object.entries(doc)) visit([key], value);
+  }
+
+  const fields: FieldInfo[] = [];
+  for (const [escapedPath, entry] of seen) {
+    const types = new Set(entry.types);
+    // A null alongside real values is just a missing value, not a type conflict.
+    if (types.size > 1) types.delete('null');
+    const type: FieldType = types.size === 1 ? [...types][0] : 'mixed';
+    fields.push({ path: entry.path, escapedPath, type, isNested: entry.isNested });
+  }
+
+  return fields.sort((a, b) => {
+    if (a.escapedPath === '_id') return -1;
+    if (b.escapedPath === '_id') return 1;
+    if (a.path < b.path) return -1;
+    return a.path > b.path ? 1 : 0;
+  });
+}
+
+/** Stable identity for a document, used to match rows across refetches. */
+export function docKey(doc: Record<string, unknown>): string {
+  return JSON.stringify(doc._id) ?? '';
+}

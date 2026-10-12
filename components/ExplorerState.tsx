@@ -3,6 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import ResultsGrid from '@/components/ResultsGrid';
+import RowDetailPanel from '@/components/RowDetailPanel';
+import { docKey } from '@/lib/astra/schema';
+import { loadLayout } from '@/lib/ui/columnLayout';
 import {
   type PageSize,
   type QuerySpec,
@@ -70,6 +73,11 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
+  const [selectedDoc, setSelectedDoc] = useState<Doc | null>(null);
+  // $vector is excluded from fetches unless its column is made visible in the grid.
+  const [showVector, setShowVector] = useState(
+    () => loadLayout(keyspace, collection).columnVisibility.$vector === true,
+  );
   // pageIndex -> pageState used to load that page, so Previous can step back.
   const pageStateHistory = useRef<Map<number, string | null>>(new Map());
 
@@ -90,7 +98,9 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
     Promise.all([
-      fetchJson<{ documents: Doc[]; nextPageState: string | null }>(`/api/query?${specQuery}`),
+      fetchJson<{ documents: Doc[]; nextPageState: string | null }>(
+        `/api/query?${specQuery}${showVector ? '&sv=1' : ''}`,
+      ),
       fetchJson<CountInfo>(`/api/count?${specQuery}`),
     ])
       .then(([q, c]) => {
@@ -111,7 +121,7 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     return () => {
       cancelled = true;
     };
-  }, [specQuery, refreshToken]);
+  }, [specQuery, refreshToken, showVector]);
 
   const updateSpec = useCallback(
     (next: QuerySpec) => {
@@ -140,6 +150,11 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
   const changePageSize = (pageSize: PageSize) => {
     updateSpec({ ...spec, pageSize, pageState: null, pageIndex: 0 });
   };
+
+  const handleRowClick = useCallback((doc: Doc) => {
+    // Clicking the open row again closes the panel.
+    setSelectedDoc((current) => (current !== null && docKey(current) === docKey(doc) ? null : doc));
+  }, []);
 
   const buttonClass =
     'px-3 py-1 text-xs font-medium rounded border disabled:opacity-40 disabled:cursor-not-allowed';
@@ -212,7 +227,22 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
         {loading && <Spinner />}
       </div>
 
-      <ResultsGrid documents={documents} />
+      <ResultsGrid
+        documents={documents}
+        keyspace={keyspace}
+        collection={collection}
+        onRowClick={handleRowClick}
+        selectedKey={selectedDoc ? docKey(selectedDoc) : null}
+        onShowVectorChange={setShowVector}
+      />
+
+      {selectedDoc && (
+        <RowDetailPanel
+          key={docKey(selectedDoc)}
+          doc={selectedDoc}
+          onClose={() => setSelectedDoc(null)}
+        />
+      )}
     </div>
   );
 }
