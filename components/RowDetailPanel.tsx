@@ -8,6 +8,8 @@ type Doc = Record<string, unknown>;
 interface RowDetailPanelProps {
   doc: Doc;
   onClose: () => void;
+  /** Provided only for vector collections; enables the "Find similar" button. */
+  onFindSimilar?: (doc: Doc) => void;
 }
 
 /** Height of the app header (Tailwind `h-14`), which the panel sits below. */
@@ -122,7 +124,7 @@ function initialExpanded(doc: Doc): Set<string> {
   return paths;
 }
 
-export default function RowDetailPanel({ doc, onClose }: RowDetailPanelProps) {
+export default function RowDetailPanel({ doc, onClose, onFindSimilar }: RowDetailPanelProps) {
   // Top-level keys start expanded; nested containers start collapsed.
   const [expanded, setExpanded] = useState<Set<string>>(() => initialExpanded(doc));
   const [copied, setCopied] = useState<'json' | 'id' | null>(null);
@@ -202,8 +204,20 @@ export default function RowDetailPanel({ doc, onClose }: RowDetailPanelProps) {
         >
           {copied === 'id' ? 'Copied' : 'Copy _id'}
         </button>
-        <span title="Find similar — available for vector collections">
-          <button type="button" className={`${buttonClass} cursor-not-allowed`} style={buttonStyle} disabled>
+        <span
+          title={
+            onFindSimilar
+              ? 'Search for documents similar to this one'
+              : 'Find similar — available for vector collections'
+          }
+        >
+          <button
+            type="button"
+            className={`${buttonClass} ${onFindSimilar ? '' : 'cursor-not-allowed'}`}
+            style={buttonStyle}
+            disabled={!onFindSimilar}
+            onClick={() => onFindSimilar?.(doc)}
+          >
             Find similar
           </button>
         </span>

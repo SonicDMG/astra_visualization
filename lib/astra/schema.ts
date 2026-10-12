@@ -11,6 +11,36 @@ import {
 } from '@/lib/query/compile';
 
 /**
+ * Vectorize providers that need a user-supplied API key. The key is either stored in
+ * Astra KMS (`service.authentication.providerKey`) or sent per request in a header
+ * (`x-embedding-api-key`). Providers that need no key (e.g. NVIDIA, which Astra hosts)
+ * are deliberately absent. Kept small and conservative: unknown providers are never blocked.
+ */
+const KEY_REQUIRED_VECTORIZE_PROVIDERS: ReadonlySet<string> = new Set([
+  'openai',
+  'azureOpenAI',
+  'cohere',
+  'jinaAI',
+  'voyageAI',
+  'mistral',
+  'huggingface',
+]);
+
+/**
+ * Best-effort heuristic: semantic TEXT search can't work when the collection's vectorize
+ * provider needs a key, the collection stores none (`service.authentication` absent or
+ * empty), and this app never sends an embedding-key header. Only true for providers in
+ * {@link KEY_REQUIRED_VECTORIZE_PROVIDERS}.
+ */
+export function vectorizeRequiresHeaderKey(
+  provider: string | null | undefined,
+  authentication: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!provider || !KEY_REQUIRED_VECTORIZE_PROVIDERS.has(provider)) return false;
+  return !authentication || Object.keys(authentication).length === 0;
+}
+
+/**
  * Derive a normalized capability summary from raw collection definition.
  * This function is pure — no I/O, no env access, no side effects.
  */
@@ -25,6 +55,10 @@ export function parseCapabilities(definition: CollectionDefinition): CollectionC
     vectorMetric: vector?.metric ?? null,
     vectorizeProvider: vectorService?.provider ?? null,
     vectorizeModel: vectorService?.modelName ?? null,
+    vectorizeNeedsKey: vectorizeRequiresHeaderKey(
+      vectorService?.provider,
+      vectorService?.authentication,
+    ),
     hasLexical: !!definition.lexical?.enabled,
     hasRerank: !!rerank?.enabled,
     indexing: parseIndexing(definition.indexing),

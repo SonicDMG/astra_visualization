@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { count } from '@/lib/astra/gateway';
+import { statusForErrorCode } from '@/lib/astra/errors';
 import { querySpecFromUrlParams } from '@/lib/query/types';
 import { validateFilter } from '@/lib/query/compile';
 import type { FieldType } from '@/lib/astra/schema';
@@ -41,7 +42,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   const result = await count(spec, { fieldTypes });
   if (result.error) {
-    return NextResponse.json({ error: result.error }, { status: 500 });
+    return NextResponse.json(
+      { error: result.error, ...(result.errorCode ? { errorCode: result.errorCode } : {}) },
+      { status: statusForErrorCode(result.errorCode) },
+    );
   }
   return NextResponse.json({
     count: result.count,

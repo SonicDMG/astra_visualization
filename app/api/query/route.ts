@@ -1,19 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/astra/gateway';
+import { statusForErrorCode } from '@/lib/astra/errors';
 import { querySpecFromUrlParams } from '@/lib/query/types';
 import { validateFilter } from '@/lib/query/compile';
 import type { FieldType } from '@/lib/astra/schema';
-
-/** Sort limits are caller-correctable (422); everything else is a server failure (500). */
-const CLIENT_ERROR_CODES: ReadonlySet<string> = new Set([
-  'OVERLOADED_SORT_ROW_LIMIT',
-  'SORT_PAGE_BEYOND_LIMIT',
-  'NON_INDEXED_FIELD',
-  'TOO_MANY_IN_VALUES',
-  'TOO_MANY_CONDITIONS',
-  'MISSING_VALUE',
-  'INVALID_DATE',
-]);
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const params = request.nextUrl.searchParams;
@@ -59,10 +49,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   const result = await query(spec, { projection, fieldTypes });
   if (result.error) {
-    const status = result.errorCode && CLIENT_ERROR_CODES.has(result.errorCode) ? 422 : 500;
     return NextResponse.json(
       { error: result.error, ...(result.errorCode ? { errorCode: result.errorCode } : {}) },
-      { status },
+      { status: statusForErrorCode(result.errorCode) },
     );
   }
   return NextResponse.json({

@@ -62,17 +62,40 @@ export type FilterTree = {
   children: (Condition | FilterGroup)[];
 };
 
+/** Query text and/or an explicit query vector for the search modes. */
+export type SearchInput = { text: string; vector: number[] | null };
+
+/** Semantic mode: embed `searchInput.text` via `$vectorize`, or use `searchInput.vector` directly. */
+export type SemanticSource = 'text' | 'vector';
+
+/**
+ * The `_id` of a "find similar" source document. Wider than `FilterValue` because
+ * the Data API can return `_id` as an extended-JSON wrapper (`{ $uuid }`, `{ $objectId }`).
+ */
+export type DocId = string | number | { $uuid: string } | { $objectId: string };
+
 export type QuerySpec = {
   keyspace: string;
   collection: string;
   searchMode: SearchMode;
   filter: FilterTree;
-  sort: SortKey[]; // ordered by priority; empty = unsorted
-  // searchInput: SearchInput — add in Phase 7
+  /**
+   * Ordered by priority; empty = unsorted. In browse mode this is sent to the Data API.
+   * In search modes it is a LOCAL (browser-side) sort of the loaded results: the
+   * gateway never sends it, and it does not trigger a refetch.
+   */
+  sort: SortKey[];
+  searchInput: SearchInput;
+  semanticSource: SemanticSource;
+  /**
+   * "Find similar": when set (semantic mode), the server looks up this document's
+   * `$vector` and searches with it. Keeps the URL small versus embedding the vector.
+   */
+  similarTo: DocId | null;
   pageState: string | null; // for unsorted browse
   pageIndex: number; // for sorted/search paging
   pageSize: PageSize;
-  searchLimit: number; // 10-1000, for search modes
+  searchLimit: number; // 1-1000, for search modes
 };
 
 const SEARCH_MODES: readonly SearchMode[] = ['browse', 'semantic', 'keyword', 'hybrid'];
@@ -80,9 +103,44 @@ const PAGE_SIZES: readonly PageSize[] = [20, 50, 100];
 
 const DEFAULT_SEARCH_MODE: SearchMode = 'browse';
 const DEFAULT_PAGE_SIZE: PageSize = 20;
-const DEFAULT_SEARCH_LIMIT = 100;
-const MIN_SEARCH_LIMIT = 10;
-const MAX_SEARCH_LIMIT = 1000;
+export const DEFAULT_SEARCH_LIMIT = 50;
+export const MIN_SEARCH_LIMIT = 1;
+export const MAX_SEARCH_LIMIT = 1000;
+
+/** Clamps to an integer in [MIN_SEARCH_LIMIT, MAX_SEARCH_LIMIT]; non-finite input yields the default. */
+export function clampSearchLimit(limit: number): number {
+  if (!Number.isFinite(limit)) return DEFAULT_SEARCH_LIMIT;
+  return Math.min(MAX_SEARCH_LIMIT, Math.max(MIN_SEARCH_LIMIT, Math.trunc(limit)));
+}
+
+export function isDocId(value: unknown): value is DocId {
+  if (typeof value === 'string') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== 1) return false;
+  const inner = (value as Record<string, unknown>)[keys[0]];
+  return (keys[0] === '$uuid' || keys[0] === '$objectId') && typeof inner === 'string';
+}
+
+/** Comma-joined numbers: compact and lossless (`String(n)` round-trips every finite double). */
+export function vectorToParam(vector: number[]): string {
+  // `String(-0)` is "0"; write `-0` explicitly so the round trip is lossless.
+  return vector.map((n) => (Object.is(n, -0) ? '-0' : String(n))).join(',');
+}
+
+/** Lenient: any malformed or empty input yields `null`; never throws. */
+export function vectorFromParam(value: string | null): number[] | null {
+  if (!value) return null;
+  const vector: number[] = [];
+  for (const part of value.split(',')) {
+    if (part.trim() === '') return null;
+    const n = Number(part);
+    if (!Number.isFinite(n)) return null;
+    vector.push(n);
+  }
+  return vector.length > 0 ? vector : null;
+}
 
 export function defaultFilterTree(): FilterTree {
   return { combinator: 'and', children: [] };
@@ -95,6 +153,9 @@ export function defaultQuerySpec(keyspace: string, collection: string): QuerySpe
     searchMode: DEFAULT_SEARCH_MODE,
     filter: defaultFilterTree(),
     sort: [],
+    searchInput: { text: '', vector: null },
+    semanticSource: 'text',
+    similarTo: null,
     pageState: null,
     pageIndex: 0,
     pageSize: DEFAULT_PAGE_SIZE,
@@ -112,6 +173,12 @@ export function querySpecToUrlParams(spec: QuerySpec): URLSearchParams {
   params.set('keyspace', spec.keyspace);
   params.set('collection', spec.collection);
   if (spec.searchMode !== DEFAULT_SEARCH_MODE) params.set('sm', spec.searchMode);
+  if (spec.searchInput.text !== '') params.set('q', spec.searchInput.text);
+  if (spec.searchInput.vector && spec.searchInput.vector.length > 0) {
+    params.set('qv', vectorToParam(spec.searchInput.vector));
+  }
+  if (spec.semanticSource !== 'text') params.set('ss', spec.semanticSource);
+  if (spec.similarTo !== null) params.set('fs', JSON.stringify(spec.similarTo));
   if (spec.filter && spec.filter.children.length > 0) {
     const f = filterToParam(spec.filter);
     if (f) params.set('f', f);
@@ -293,6 +360,18 @@ export function querySpecFromUrlParams(
   const searchMode = SEARCH_MODES.find((m) => m === sm);
   if (searchMode) spec.searchMode = searchMode;
 
+  spec.searchInput = { text: params.get('q') ?? '', vector: vectorFromParam(params.get('qv')) };
+  if (params.get('ss') === 'vector') spec.semanticSource = 'vector';
+  const fs = params.get('fs');
+  if (fs) {
+    try {
+      const parsed: unknown = JSON.parse(fs);
+      if (isDocId(parsed)) spec.similarTo = parsed;
+    } catch {
+      // Lenient: a malformed `fs` is ignored.
+    }
+  }
+
   spec.filter = filterFromParam(params.get('f'));
   spec.sort = sortFromParam(params.get('so'));
 
@@ -307,9 +386,7 @@ export function querySpecFromUrlParams(
   if (pageSize) spec.pageSize = pageSize;
 
   const sl = parseIntParam(params.get('sl'));
-  if (sl !== null) {
-    spec.searchLimit = Math.min(MAX_SEARCH_LIMIT, Math.max(MIN_SEARCH_LIMIT, sl));
-  }
+  if (sl !== null) spec.searchLimit = clampSearchLimit(sl);
 
   return spec;
 }

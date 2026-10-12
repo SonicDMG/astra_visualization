@@ -24,8 +24,8 @@ import {
   unwrapScalar,
 } from '@/lib/astra/schema';
 import type { CollectionCapabilities } from '@/lib/astra/gateway';
-import { cycleSort, displayPath } from '@/lib/query/compile';
-import type { SortKey } from '@/lib/query/types';
+import { SCORE_FIELDS, cycleSort, displayPath } from '@/lib/query/compile';
+import type { SearchMode, SortKey } from '@/lib/query/types';
 import { type ColumnLayout, loadLayout, saveLayout } from '@/lib/ui/columnLayout';
 
 type Doc = Record<string, unknown>;
@@ -34,12 +34,12 @@ interface ResultsGridProps {
   documents: Doc[];
   keyspace: string;
   collection: string;
-  /** Active sort keys (priority order). Sorting is server-side (`manualSorting`). */
-  sort: SortKey[];
   /**
-   * Called with the next sort after a header click. Reusable by a local (browser-side)
-   * sort for search modes later: the grid only reports intent, it never sorts rows.
+   * Active sort keys (priority order). The grid never sorts rows itself (`manualSorting`):
+   * in browse mode the server sorts; in search modes the parent sorts the results locally.
    */
+  sort: SortKey[];
+  /** Called with the next sort after a header click. */
   onSortChange: (sort: SortKey[]) => void;
   /** The collection's `indexing` option; non-indexed fields can't be sorted. */
   indexing?: CollectionCapabilities['indexing'];
@@ -49,6 +49,10 @@ interface ResultsGridProps {
   selectedKey?: string | null;
   /** Called whenever the `$vector` column is shown/hidden so the parent can re-fetch. */
   onShowVectorChange?: (show: boolean) => void;
+  /** Search modes sort locally (badge on sorted headers) and show score columns. */
+  searchMode?: SearchMode;
+  /** When set, every row gets a "Find similar" action. */
+  onFindSimilar?: (doc: Doc) => void;
 }
 
 /** Per-column UI info that doesn't belong in the TanStack column definition. */
@@ -71,6 +75,9 @@ const ID_COLUMN = '_id';
 const VECTOR_COLUMN = '$vector';
 const VECTORIZE_COLUMN = '$vectorize';
 const COLUMN_PINNING = { left: [ID_COLUMN] };
+const ACTION_COL_WIDTH = 110;
+const SCORE_DECIMALS = 4;
+const SCORE_COLUMNS: ReadonlySet<string> = new Set(SCORE_FIELDS);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -113,6 +120,10 @@ function pinnedStyle(isPinned: boolean, zIndex: number, left: number): React.CSS
     : { position: 'relative' };
 }
 
+function pinnedRightStyle(zIndex: number): React.CSSProperties {
+  return { position: 'sticky', right: 0, zIndex, background: 'var(--astra-sidebar)' };
+}
+
 function parentPath(escapedPath: string): string | null {
   const index = escapedPath.lastIndexOf('.');
   return index === -1 ? null : escapedPath.slice(0, index);
@@ -129,6 +140,8 @@ function sortBlockedReason(
   field: FieldInfo,
   indexing: CollectionCapabilities['indexing'] | undefined,
 ): string | null {
+  // Score columns are synthetic (not stored), so indexing doesn't apply; they sort locally.
+  if (SCORE_COLUMNS.has(field.escapedPath)) return null;
   if (field.escapedPath === VECTOR_COLUMN || field.escapedPath === VECTORIZE_COLUMN) {
     return "Vectors can't be sorted";
   }
@@ -201,12 +214,20 @@ function buildColumns(
             </>
           );
         }
+        if (SCORE_COLUMNS.has(id) && typeof value === 'number') return value.toFixed(SCORE_DECIMALS);
         return formatCell(value);
       },
     });
   };
 
-  topLevel.filter((f) => f.escapedPath !== VECTOR_COLUMN).forEach((f) => emit(f));
+  // Score columns (`$similarity`, `$rerank`, …) come first, right after `_id`.
+  const isScore = (f: FieldInfo) => SCORE_COLUMNS.has(f.escapedPath);
+  const ordered = [
+    ...topLevel.filter((f) => f.escapedPath === ID_COLUMN),
+    ...SCORE_FIELDS.flatMap((name) => topLevel.filter((f) => f.escapedPath === name)),
+    ...topLevel.filter((f) => f.escapedPath !== ID_COLUMN && !isScore(f)),
+  ];
+  ordered.filter((f) => f.escapedPath !== VECTOR_COLUMN).forEach((f) => emit(f));
   // $vector is always offered (hidden by default) and kept last.
   const vector = topLevel.find((f) => f.escapedPath === VECTOR_COLUMN) ?? {
     path: VECTOR_COLUMN,
@@ -253,6 +274,9 @@ interface GridTableProps {
   onReorder: (fromId: string, toId: string) => void;
   /** Header click; `additive` is true for Shift-click. Never called for blocked columns. */
   onHeaderSort: (columnId: string, additive: boolean) => void;
+  /** Sorting happens in the browser (search modes): sorted headers get a "local" badge. */
+  localSort: boolean;
+  onFindSimilar?: (doc: Doc) => void;
 }
 
 function GridTable({
@@ -263,6 +287,8 @@ function GridTable({
   onToggleExpand,
   onReorder,
   onHeaderSort,
+  localSort,
+  onFindSimilar,
 }: GridTableProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
@@ -302,7 +328,11 @@ function GridTable({
     >
       <table
         className="text-sm"
-        style={{ display: 'grid', width: table.getTotalSize(), color: 'var(--astra-text)' }}
+        style={{
+          display: 'grid',
+          width: table.getTotalSize() + (onFindSimilar ? ACTION_COL_WIDTH : 0),
+          color: 'var(--astra-text)',
+        }}
       >
         <thead className="sticky top-0 z-10" style={{ display: 'grid', background: 'var(--astra-sidebar)' }}>
           {headerGroups.map((group) => (
@@ -401,6 +431,14 @@ function GridTable({
                         >
                           {sortDir === 'asc' ? '▲' : '▼'}
                           {sortCount > 1 ? sortIndex + 1 : ''}
+                          {localSort && (
+                            <span
+                              className="ml-1 rounded border px-1 text-[10px] font-medium"
+                              title="Sorted in your browser"
+                            >
+                              local
+                            </span>
+                          )}
                         </span>
                       )}
                     </div>
@@ -445,6 +483,24 @@ function GridTable({
                   </th>
                 );
               })}
+              {onFindSimilar && (
+                <th
+                  scope="col"
+                  className="px-2 text-left font-medium text-xs uppercase tracking-wider border-b"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    width: ACTION_COL_WIDTH,
+                    height: ROW_HEIGHT,
+                    flexShrink: 0,
+                    color: 'var(--astra-muted)',
+                    borderColor: 'var(--astra-border)',
+                    ...pinnedRightStyle(3),
+                  }}
+                >
+                  Actions
+                </th>
+              )}
             </tr>
           ))}
         </thead>
@@ -499,6 +555,38 @@ function GridTable({
                     </td>
                   );
                 })}
+                {onFindSimilar && (
+                  <td
+                    className="px-2 border-b"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      width: ACTION_COL_WIDTH,
+                      flexShrink: 0,
+                      borderColor: 'var(--astra-border)',
+                      ...pinnedRightStyle(1),
+                      ...(selected ? { background: 'var(--astra-surface)' } : {}),
+                    }}
+                  >
+                    <button
+                      type="button"
+                      className="rounded border px-2 py-0.5 text-xs"
+                      style={{
+                        background: 'var(--astra-surface)',
+                        borderColor: 'var(--astra-border)',
+                        color: 'var(--astra-text)',
+                      }}
+                      title="Search for documents similar to this one"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onFindSimilar(row.original);
+                      }}
+                      onKeyDown={(e) => e.stopPropagation()}
+                    >
+                      Find similar
+                    </button>
+                  </td>
+                )}
               </tr>
             );
           })}
@@ -595,6 +683,8 @@ export default function ResultsGrid({
   onRowClick,
   selectedKey = null,
   onShowVectorChange,
+  searchMode = 'browse',
+  onFindSimilar,
 }: ResultsGridProps) {
   const [view, setView] = useState<'table' | 'json'>('table');
   // Restored from localStorage on mount (parent remounts this component per collection).
@@ -622,8 +712,9 @@ export default function ResultsGrid({
   }, []);
 
   const built = useMemo(
-    () => buildColumns(fields, expanded, toggleExpand, indexing),
-    [fields, expanded, toggleExpand, indexing],
+    // Local sorting (search modes) doesn't need an index, so indexing only blocks server sorts.
+    () => buildColumns(fields, expanded, toggleExpand, searchMode === 'browse' ? indexing : null),
+    [fields, expanded, toggleExpand, indexing, searchMode],
   );
 
   const sorting = useMemo(
@@ -641,7 +732,8 @@ export default function ResultsGrid({
     data: documents,
     columns: built.columns,
     getCoreRowModel: getCoreRowModel(),
-    // Sorting happens on the server; the grid only displays it and reports header clicks.
+    // The grid only displays the sort and reports header clicks; the server (browse) or the
+    // parent (search modes, locally) orders the rows.
     manualSorting: true,
     enableColumnResizing: true,
     columnResizeMode: 'onChange',
@@ -732,6 +824,8 @@ export default function ResultsGrid({
           onToggleExpand={toggleExpand}
           onReorder={reorder}
           onHeaderSort={handleHeaderSort}
+          localSort={searchMode !== 'browse'}
+          onFindSimilar={onFindSimilar}
         />
       ) : (
         <pre

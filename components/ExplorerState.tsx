@@ -5,9 +5,10 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import FilterBuilder from '@/components/FilterBuilder';
 import ResultsGrid from '@/components/ResultsGrid';
 import RowDetailPanel from '@/components/RowDetailPanel';
+import SearchBar, { type SearchPatch } from '@/components/SearchBar';
 import type { CollectionCapabilities } from '@/lib/astra/gateway';
-import { deriveFields, docKey } from '@/lib/astra/schema';
-import { displayPath } from '@/lib/query/compile';
+import { deriveFields, docKey, unwrapScalar } from '@/lib/astra/schema';
+import { displayPath, sortDocumentsLocally } from '@/lib/query/compile';
 import { loadLayout } from '@/lib/ui/columnLayout';
 import {
   type FilterTree,
@@ -16,6 +17,7 @@ import {
   type SortKey,
   SORT_MAX_DOCUMENTS,
   defaultFilterTree,
+  isDocId,
   querySpecFromUrlParams,
   querySpecToUrlParams,
 } from '@/lib/query/types';
@@ -34,6 +36,7 @@ interface ExplorerStateProps {
 }
 
 const PAGE_SIZES: PageSize[] = [20, 50, 100];
+const NO_DOCUMENTS: Doc[] = [];
 /** Sort errors that leave the grid intact and offer "Clear sort". */
 const SORT_ERROR_CODES: ReadonlySet<string> = new Set([
   'OVERLOADED_SORT_ROW_LIMIT',
@@ -100,7 +103,7 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
   const [nextPageState, setNextPageState] = useState<string | null>(null);
   const [hasNextPage, setHasNextPage] = useState(false);
   const [countInfo, setCountInfo] = useState<CountInfo | null>(null);
-  const [indexing, setIndexing] = useState<CollectionCapabilities['indexing']>(null);
+  const [capabilities, setCapabilities] = useState<CollectionCapabilities | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<{ message: string; code: string | null } | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
@@ -118,14 +121,24 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     () => querySpecFromUrlParams(new URLSearchParams(paramsString), keyspace, collection),
     [paramsString, keyspace, collection],
   );
-  const specQuery = querySpecToUrlParams(spec).toString();
+  const isSearch = spec.searchMode !== 'browse';
+  const indexing = capabilities?.indexing ?? null;
+  // In search modes the sort is LOCAL (applied in the browser to the loaded results), so it,
+  // and the unused paging fields, are left out of the request: changing them never refetches.
+  const specQuery = useMemo(
+    () =>
+      querySpecToUrlParams(
+        isSearch ? { ...spec, sort: [], pageState: null, pageIndex: 0 } : spec,
+      ).toString(),
+    [spec, isSearch],
+  );
 
   // Reset paging history when the collection changes.
   useEffect(() => {
     pageStateHistory.current = new Map();
   }, [keyspace, collection]);
 
-  // The collection's indexing options decide which columns are sortable.
+  // Capabilities decide which search modes are offered and which columns are sortable.
   useEffect(() => {
     let cancelled = false;
     fetchJson<{ collections: { name: string; capabilities: CollectionCapabilities }[] }>(
@@ -134,33 +147,44 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
       .then((data) => {
         if (cancelled) return;
         const found = data.collections.find((c) => c.name === collection);
-        setIndexing(found?.capabilities.indexing ?? null);
+        setCapabilities(found?.capabilities ?? null);
       })
       .catch(() => {
-        // Non-fatal: without indexing info every scalar column stays sortable.
+        // Non-fatal: only Browse is offered, and every scalar column stays sortable.
       });
     return () => {
       cancelled = true;
     };
   }, [keyspace, collection]);
 
+  const hasFilter = spec.filter.children.length > 0;
   const fieldTypesParam = useMemo(() => {
-    if (documents.length === 0) return '';
+    // Field types only matter for filters. Skipping them otherwise avoids the refetch they
+    // trigger, which for a search would be a second embedding/rerank call.
+    if (documents.length === 0 || (isSearch && !hasFilter)) return '';
     const fields = deriveFields(documents);
     const map = Object.fromEntries(fields.map((f) => [f.escapedPath, f.type]));
     return `&ft=${encodeURIComponent(JSON.stringify(map))}`;
-  }, [documents]);
+  }, [documents, isSearch, hasFilter]);
 
   useEffect(() => {
     let cancelled = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
-    Promise.all([
-      fetchJson<{ documents: Doc[]; nextPageState: string | null; hasNextPage: boolean }>(
-        `/api/query?${specQuery}${showVector ? '&sv=1' : ''}${fieldTypesParam}`,
-      ),
-      fetchJson<CountInfo>(`/api/count?${specQuery}${fieldTypesParam}`),
-    ])
+    const queryRequest = fetchJson<{
+      documents: Doc[];
+      nextPageState: string | null;
+      hasNextPage: boolean;
+    }>(`/api/query?${specQuery}${showVector ? '&sv=1' : ''}${fieldTypesParam}`);
+    // Search modes never count: the count is the number of returned results.
+    const countRequest: Promise<CountInfo> = isSearch
+      ? queryRequest.then((q) => ({
+          count: q.documents.length,
+          isEstimate: false,
+          isOver1000: false,
+        }))
+      : fetchJson<CountInfo>(`/api/count?${specQuery}${fieldTypesParam}`);
+    Promise.all([queryRequest, countRequest])
       .then(([q, c]) => {
         if (cancelled) return;
         setDocuments(q.documents);
@@ -183,7 +207,7 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     return () => {
       cancelled = true;
     };
-  }, [specQuery, refreshToken, showVector, fieldTypesParam]);
+  }, [specQuery, isSearch, refreshToken, showVector, fieldTypesParam]);
 
   const updateSpec = useCallback(
     (next: QuerySpec) => {
@@ -228,11 +252,54 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     [spec, updateSpec],
   );
 
+  // Entering or leaving a search mode resets paging and clears the sort.
+  const applySearch = useCallback(
+    (patch: SearchPatch) => {
+      updateSpec({ ...spec, ...patch, sort: [], pageState: null, pageIndex: 0 });
+    },
+    [spec, updateSpec],
+  );
+
+  // "Find similar": the server resolves the source document's `$vector`, keeping the URL small.
+  const findSimilar = useCallback(
+    (doc: Doc) => {
+      if (!isDocId(doc._id)) return;
+      setSelectedDoc(null);
+      updateSpec({
+        ...spec,
+        searchMode: 'semantic',
+        semanticSource: 'vector',
+        searchInput: { text: '', vector: null },
+        similarTo: doc._id,
+        sort: [],
+        pageState: null,
+        pageIndex: 0,
+      });
+    },
+    [spec, updateSpec],
+  );
+
   const goToPage = (pageIndex: number) => {
     updateSpec({ ...spec, pageState: null, pageIndex });
   };
 
   const sorted = spec.sort.length > 0;
+  // Search modes sort the loaded results in the browser; a failed search shows no stale rows.
+  const shownDocuments = useMemo(() => {
+    if (!isSearch) return documents;
+    if (error) return NO_DOCUMENTS;
+    return sortDocumentsLocally(documents, spec.sort);
+  }, [documents, isSearch, error, spec.sort]);
+  const canFindSimilar = capabilities?.hasVector === true;
+  const searchBarKey = [
+    spec.searchMode,
+    spec.searchInput.text,
+    spec.searchInput.vector?.length ?? 0,
+    spec.semanticSource,
+    spec.searchLimit,
+    spec.similarTo === null ? 0 : 1,
+    capabilities === null ? 0 : 1,
+  ].join('|');
   const maxPages = Math.ceil(SORT_MAX_DOCUMENTS / spec.pageSize);
   // Count is an unfiltered estimate; never let it hide the page after the current one.
   const countPages = countInfo ? Math.ceil(countInfo.count / spec.pageSize) : maxPages;
@@ -293,6 +360,15 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
           style={{ color: 'var(--astra-muted)' }}
         >
           <span>Sorted by</span>
+          {isSearch && (
+            <span
+              className="rounded border px-1.5 py-0.5"
+              style={{ borderColor: 'var(--astra-accent)', color: 'var(--astra-accent)' }}
+              title="Search results are sorted in your browser; the server order is relevance"
+            >
+              local
+            </span>
+          )}
           {spec.sort.map((key, index) => (
             <span
               key={key.field}
@@ -318,7 +394,7 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
             style={buttonStyle}
             onClick={() => changeSort([])}
           >
-            Clear sort
+            {isSearch ? 'Restore relevance order' : 'Clear sort'}
           </button>
         </div>
       )}
@@ -350,6 +426,45 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
         </div>
       )}
 
+      <SearchBar
+        key={searchBarKey}
+        spec={spec}
+        capabilities={capabilities}
+        onApply={applySearch}
+      />
+
+      {spec.similarTo !== null && (
+        <div
+          className="flex items-center gap-2 flex-wrap text-xs"
+          style={{ color: 'var(--astra-muted)' }}
+        >
+          <span>Similar to</span>
+          <span
+            className="rounded border px-2 py-0.5 font-mono"
+            style={buttonStyle}
+            title={JSON.stringify(spec.similarTo)}
+          >
+            {String(unwrapScalar(spec.similarTo))}
+          </span>
+          <button
+            type="button"
+            className={buttonClass}
+            style={buttonStyle}
+            onClick={() =>
+              applySearch({
+                searchMode: 'browse',
+                searchInput: { text: '', vector: null },
+                semanticSource: spec.semanticSource,
+                similarTo: null,
+                searchLimit: spec.searchLimit,
+              })
+            }
+          >
+            Back to browse
+          </button>
+        </div>
+      )}
+
       <div className="flex items-center gap-3 flex-wrap text-xs" style={{ color: 'var(--astra-muted)' }}>
         <button
           type="button"
@@ -364,7 +479,12 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
         >
           Filters{filterCount > 0 ? ` (${filterCount})` : ''}
         </button>
-        {sorted ? (
+        {isSearch ? (
+          <span>
+            Showing {shownDocuments.length.toLocaleString('en-US')}{' '}
+            {shownDocuments.length === 1 ? 'result' : 'results'}
+          </span>
+        ) : sorted ? (
           <nav className="flex items-center gap-1" aria-label="Sorted results pages">
             <button
               type="button"
@@ -448,6 +568,7 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
           </>
         )}
 
+        {!isSearch && (
         <label className="flex items-center gap-1">
           Page size
           <select
@@ -463,6 +584,7 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
             ))}
           </select>
         </label>
+        )}
 
         <button
           type="button"
@@ -474,7 +596,7 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
           Refresh
         </button>
 
-        {countInfo && <span>{formatCount(countInfo)}</span>}
+        {countInfo && !isSearch && <span>{formatCount(countInfo)}</span>}
         {loading && <Spinner />}
       </div>
 
@@ -490,7 +612,7 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
       )}
 
       <ResultsGrid
-        documents={documents}
+        documents={shownDocuments}
         keyspace={keyspace}
         collection={collection}
         sort={spec.sort}
@@ -499,6 +621,8 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
         onRowClick={handleRowClick}
         selectedKey={selectedDoc ? docKey(selectedDoc) : null}
         onShowVectorChange={setShowVector}
+        searchMode={spec.searchMode}
+        onFindSimilar={canFindSimilar ? findSimilar : undefined}
       />
 
       {selectedDoc && (
@@ -506,6 +630,7 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
           key={docKey(selectedDoc)}
           doc={selectedDoc}
           onClose={() => setSelectedDoc(null)}
+          onFindSimilar={canFindSimilar ? findSimilar : undefined}
         />
       )}
     </div>
