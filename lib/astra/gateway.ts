@@ -33,6 +33,8 @@ export const configError: string | null = validateConfig();
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
+import type { QuerySpec } from '@/lib/query/types';
+
 // Import SDK types for compatibility
 import type {
   CollectionDescriptor as SDKCollectionDescriptor,
@@ -193,20 +195,75 @@ export function parseCapabilities(definition: CollectionDefinition): CollectionC
   };
 }
 
-// ─── Stubs for Phase 3+ ─────────────────────────────────────────────────────
+// ─── Query / count ──────────────────────────────────────────────────────────
 
-export async function query(
-  _keyspace: string,
-  _collection: string,
-  _filter: Record<string, unknown>,
-): Promise<unknown[]> {
-  throw new Error('not implemented');
+export type QueryResult = {
+  documents: Record<string, unknown>[];
+  nextPageState: string | null;
+  error?: string;
+};
+
+export type CountResult = {
+  count: number;
+  isEstimate: boolean;
+  isOver1000: boolean;
+  error?: string;
+};
+
+/**
+ * Browse-mode query. Uses the raw `find` command (via `db.command`) rather than
+ * the cursor API so that `nextPageState` can be returned across stateless requests.
+ * Sort / filter / search are wired in later phases.
+ */
+export async function query(spec: QuerySpec): Promise<QueryResult> {
+  try {
+    const { DataAPIClient } = await import('@datastax/astra-db-ts');
+    const client = new DataAPIClient(TOKEN);
+    const db = client.db(ENDPOINT, { keyspace: spec.keyspace });
+
+    const response = await db.command(
+      {
+        find: {
+          filter: {},
+          projection: { $vector: 0 },
+          options: {
+            limit: spec.pageSize,
+            pageState: spec.pageState ?? undefined,
+          },
+        },
+      },
+      { collection: spec.collection },
+    );
+
+    const data = response.data as
+      | { documents?: Record<string, unknown>[]; nextPageState?: string | null }
+      | undefined;
+    return {
+      documents: data?.documents ?? [],
+      nextPageState: data?.nextPageState ?? null,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    return { documents: [], nextPageState: null, error: `Failed to query collection: ${message}` };
+  }
 }
 
-export async function count(
-  _keyspace: string,
-  _collection: string,
-  _filter: Record<string, unknown>,
-): Promise<number> {
-  throw new Error('not implemented');
+/** Browse-mode count (no filter in Phase 3), so the estimate is always used. */
+export async function count(spec: QuerySpec): Promise<CountResult> {
+  try {
+    const { DataAPIClient } = await import('@datastax/astra-db-ts');
+    const client = new DataAPIClient(TOKEN);
+    const db = client.db(ENDPOINT, { keyspace: spec.keyspace });
+
+    const n = await db.collection(spec.collection).estimatedDocumentCount();
+    return { count: n, isEstimate: true, isOver1000: false };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    return {
+      count: 0,
+      isEstimate: false,
+      isOver1000: false,
+      error: `Failed to count documents: ${message}`,
+    };
+  }
 }

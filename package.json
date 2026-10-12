@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "@datastax/astra-db-ts": "^2.3.0",
+    "@tanstack/react-table": "^8.21.3",
+    "@tanstack/react-virtual": "^3.14.15",
     "next": "16.4.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
