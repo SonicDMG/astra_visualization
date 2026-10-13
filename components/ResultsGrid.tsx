@@ -26,6 +26,7 @@ import {
 import type { CollectionCapabilities } from '@/lib/astra/gateway';
 import { SCORE_FIELDS, cycleSort, displayPath } from '@/lib/query/compile';
 import type { SearchMode, SortKey } from '@/lib/query/types';
+import { useTrace } from '@/lib/trace/TraceContext';
 import { type ColumnLayout, loadLayout, saveLayout } from '@/lib/ui/columnLayout';
 
 type Doc = Record<string, unknown>;
@@ -275,8 +276,8 @@ interface GridTableProps {
   onCellClick?: (doc: Doc, field: string) => void;
   onToggleExpand: (escapedPath: string) => void;
   onReorder: (fromId: string, toId: string) => void;
-  /** Header click; `additive` is true for Shift-click. Never called for blocked columns. */
-  onHeaderSort: (columnId: string, additive: boolean) => void;
+  /** Header click; `additive` is true for Shift-click. */
+  onHeaderSort: (columnId: string, additive: boolean, blockedReason: string | null) => void;
   /** Sorting happens in the browser (search modes): sorted headers get a "local" badge. */
   localSort: boolean;
   onFindSimilar?: (doc: Doc) => void;
@@ -355,7 +356,7 @@ function GridTable({
                   blockedReason ??
                   `Click to sort (asc → desc → off) · Shift-click to add a secondary sort${dragHint}`;
                 const triggerSort = (e: { shiftKey: boolean }) => {
-                  if (blockedReason === null) onHeaderSort(column.id, e.shiftKey);
+                  onHeaderSort(column.id, e.shiftKey, blockedReason);
                 };
                 return (
                   <th
@@ -773,8 +774,57 @@ export default function ResultsGrid({
       })),
   });
 
-  const handleHeaderSort = (columnId: string, additive: boolean) => {
-    onSortChange(cycleSort(sort, columnId, additive));
+  const { isPanelOpen, startRun, emitStep, finishRun } = useTrace();
+
+  const handleHeaderSort = (
+    columnId: string,
+    additive: boolean,
+    blockedReason: string | null,
+  ) => {
+    if (isPanelOpen) {
+      startRun({
+        sortSpec: sort.map((k) => ({ field: k.field, dir: k.dir })),
+        searchMode: searchMode ?? 'browse',
+      });
+      emitStep({
+        nodeId: 'click',
+        status: 'ok',
+        label: `Header click: "${columnId}"`,
+        detail: additive ? 'Shift-click (multi-column)' : 'Single column sort',
+      });
+      emitStep({
+        nodeId: 'gate',
+        edgeId: 'click-gate',
+        status: blockedReason ? 'blocked' : 'ok',
+        label: blockedReason ? 'Sortable check: BLOCKED' : 'Sortable check: ALLOWED',
+        detail: blockedReason ? blockedReason : 'Indexed scalar field',
+      });
+      if (blockedReason !== null) {
+        emitStep({
+          nodeId: 'noop',
+          edgeId: 'gate-noop',
+          status: 'blocked',
+          label: 'Blocked: no-op',
+          detail: blockedReason,
+        });
+        finishRun('blocked', blockedReason);
+        return;
+      }
+    }
+
+    if (blockedReason !== null) return;
+
+    const nextSort = cycleSort(sort, columnId, additive);
+    if (isPanelOpen) {
+      emitStep({
+        nodeId: 'change',
+        edgeId: 'gate-change',
+        status: 'ok',
+        label: `cycleSort (${nextSort.length} key${nextSort.length === 1 ? '' : 's'})`,
+        detail: nextSort.map((s) => `${s.field} ${s.dir}`).join(', ') || 'off',
+      });
+    }
+    onSortChange(nextSort);
   };
 
   const reorder = (fromId: string, toId: string) => {

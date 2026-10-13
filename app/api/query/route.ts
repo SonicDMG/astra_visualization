@@ -48,10 +48,16 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const projection: Record<string, 0 | 1> | undefined =
     params.get('sv') === '1' ? { '*': 1 } : undefined;
 
-  const result = await query(spec, { projection, fieldTypes });
+  const includeTrace = params.get('trace') === '1';
+
+  const result = await query(spec, { projection, fieldTypes, includeTrace });
   if (result.error) {
     return NextResponse.json(
-      { error: result.error, ...(result.errorCode ? { errorCode: result.errorCode } : {}) },
+      {
+        error: result.error,
+        ...(result.errorCode ? { errorCode: result.errorCode } : {}),
+        ...(result.trace ? { trace: result.trace } : {}),
+      },
       { status: statusForErrorCode(result.errorCode) },
     );
   }
@@ -59,5 +65,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     documents: result.documents,
     nextPageState: result.nextPageState,
     hasNextPage: result.hasNextPage,
+    ...(result.trace ? { trace: result.trace } : {}),
   });
 }

@@ -5,8 +5,11 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import FilterBuilder from '@/components/FilterBuilder';
 import ResultsGrid from '@/components/ResultsGrid';
 import RowDetailPanel from '@/components/RowDetailPanel';
+import LiveTracePanel from '@/components/LiveTracePanel';
 import SearchBar, { type SearchPatch } from '@/components/SearchBar';
 import type { CollectionCapabilities } from '@/lib/astra/gateway';
+import { useTrace } from '@/lib/trace/TraceContext';
+import type { ServerTraceEvent } from '@/lib/trace/types';
 import { deriveFields, docKey, unwrapScalar } from '@/lib/astra/schema';
 import { displayPath, sortDocumentsLocally } from '@/lib/query/compile';
 import { loadLayout } from '@/lib/ui/columnLayout';
@@ -119,6 +122,7 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   // pageIndex -> pageState used to load that page, so Previous can step back.
   const pageStateHistory = useRef<Map<number, string | null>>(new Map());
+  const { isPanelOpen, currentRun, startRun, emitStep, finishRun } = useTrace();
 
   const paramsString = searchParams.toString();
   const spec: QuerySpec = useMemo(
@@ -175,11 +179,27 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     let cancelled = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
+    const traceQueryParam = isPanelOpen ? '&trace=1' : '';
+
+    if (isPanelOpen && !isSearch && spec.sort.length > 0 && !currentRun) {
+      startRun({
+        sortSpec: spec.sort.map((k) => ({ field: k.field, dir: k.dir })),
+        searchMode: 'browse',
+      });
+      emitStep({
+        nodeId: 'change',
+        status: 'ok',
+        label: spec.pageIndex > 0 ? `Page navigation (p=${spec.pageIndex + 1})` : 'Sorted query',
+        detail: spec.sort.map((s) => `${s.field} ${s.dir}`).join(', '),
+      });
+    }
+
     const queryRequest = fetchJson<{
       documents: Doc[];
       nextPageState: string | null;
       hasNextPage: boolean;
-    }>(`/api/query?${specQuery}${showVector ? '&sv=1' : ''}${fieldTypesParam}`);
+      trace?: ServerTraceEvent[];
+    }>(`/api/query?${specQuery}${showVector ? '&sv=1' : ''}${fieldTypesParam}${traceQueryParam}`);
     // Search modes never count: the count is the number of returned results.
     const countRequest: Promise<CountInfo> = isSearch
       ? queryRequest.then((q) => ({
@@ -196,14 +216,101 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
         setHasNextPage(q.hasNextPage);
         setCountInfo(c);
         setError(null);
+
+        if (isPanelOpen && !isSearch && spec.sort.length > 0) {
+          emitStep({
+            nodeId: 'mode',
+            edgeId: 'change-mode',
+            status: 'ok',
+            label: 'Browse mode',
+          });
+
+          if (q.trace && q.trace.length > 0) {
+            const compileEvt = q.trace.find((t) => t.node === 'compile');
+            if (compileEvt) {
+              emitStep({
+                nodeId: 'compile',
+                edgeId: 'mode-compile',
+                status: 'ok',
+                label: 'compileSort (Server)',
+                detail: `Keys: ${spec.sort.length}`,
+                elapsedMs: compileEvt.ms,
+              });
+            }
+            const findEvt = q.trace.find((t) => t.node === 'find');
+            if (findEvt) {
+              emitStep({
+                nodeId: 'find',
+                edgeId: 'compile-find',
+                status: 'ok',
+                label: 'Astra find (Server)',
+                detail: `Returned ${q.documents.length} docs`,
+                elapsedMs: findEvt.ms,
+              });
+            }
+          } else {
+            emitStep({
+              nodeId: 'compile',
+              edgeId: 'mode-compile',
+              status: 'ok',
+              label: 'compileSort (Server)',
+            });
+            emitStep({
+              nodeId: 'find',
+              edgeId: 'compile-find',
+              status: 'ok',
+              label: 'Astra find (Server)',
+              detail: `Returned ${q.documents.length} docs`,
+            });
+          }
+
+          emitStep({
+            nodeId: 'render',
+            edgeId: 'find-render',
+            status: 'ok',
+            label: 'Grid renders page',
+            detail: `${q.documents.length} rows rendered`,
+          });
+          finishRun('ok');
+        }
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        // Keep previous documents visible; surface the error in a banner.
+        const errMsg = err instanceof Error ? err.message : 'Failed to load documents';
+        const errCode = err instanceof ApiRequestError ? err.errorCode : null;
         setError({
-          message: err instanceof Error ? err.message : 'Failed to load documents',
-          code: err instanceof ApiRequestError ? err.errorCode : null,
+          message: errMsg,
+          code: errCode,
         });
+
+        if (isPanelOpen && !isSearch && spec.sort.length > 0) {
+          emitStep({
+            nodeId: 'mode',
+            edgeId: 'change-mode',
+            status: 'ok',
+            label: 'Browse mode',
+          });
+          emitStep({
+            nodeId: 'compile',
+            edgeId: 'mode-compile',
+            status: 'ok',
+            label: 'compileSort (Server)',
+          });
+          emitStep({
+            nodeId: 'find',
+            edgeId: 'compile-find',
+            status: 'ok',
+            label: 'Astra find (Server)',
+          });
+          emitStep({
+            nodeId: 'errors',
+            edgeId: 'find-errors',
+            status: 'error',
+            label: 'Error banner',
+            detail: errCode ?? errMsg,
+          });
+          finishRun('error', errCode ?? errMsg);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -211,7 +318,20 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     return () => {
       cancelled = true;
     };
-  }, [specQuery, isSearch, refreshToken, showVector, fieldTypesParam]);
+  }, [
+    specQuery,
+    isSearch,
+    refreshToken,
+    showVector,
+    fieldTypesParam,
+    isPanelOpen,
+    spec.sort,
+    spec.pageIndex,
+    currentRun,
+    startRun,
+    emitStep,
+    finishRun,
+  ]);
 
   const updateSpec = useCallback(
     (next: QuerySpec) => {
@@ -294,6 +414,35 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     if (error) return NO_DOCUMENTS;
     return sortDocumentsLocally(documents, spec.sort);
   }, [documents, isSearch, error, spec.sort]);
+
+  const lastLocalSortRef = useRef<string>('');
+  useEffect(() => {
+    if (!isSearch || !isPanelOpen || spec.sort.length === 0 || error) return;
+    const sortKey = JSON.stringify(spec.sort);
+    if (lastLocalSortRef.current === sortKey) return;
+    lastLocalSortRef.current = sortKey;
+
+    emitStep({
+      nodeId: 'mode',
+      edgeId: 'change-mode',
+      status: 'ok',
+      label: 'Ranked search mode',
+    });
+    emitStep({
+      nodeId: 'local',
+      edgeId: 'mode-local',
+      status: 'ok',
+      label: `Local sort (${documents.length} docs)`,
+      detail: 'In-memory client sort (no refetch)',
+    });
+    emitStep({
+      nodeId: 'render',
+      edgeId: 'local-render',
+      status: 'ok',
+      label: 'Grid renders page',
+    });
+    finishRun('ok');
+  }, [isSearch, isPanelOpen, spec.sort, error, documents.length, emitStep, finishRun]);
   const canFindSimilar = capabilities?.hasVector === true;
   const searchBarKey = [
     spec.searchMode,
@@ -357,8 +506,10 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
   };
 
   return (
-    <div className="flex h-[calc(100vh-3.5rem)] min-h-0">
-    <div className="flex flex-col flex-1 min-w-0 min-h-0 gap-2 p-4">
+    <div className="flex flex-col h-[calc(100vh-3.5rem)] min-h-0">
+      <LiveTracePanel />
+      <div className="flex flex-1 min-h-0">
+        <div className="flex flex-col flex-1 min-w-0 min-h-0 gap-2 p-4">
       {error && (
         <div
           role="alert"
@@ -650,19 +801,20 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
         searchMode={spec.searchMode}
         onFindSimilar={canFindSimilar ? findSimilar : undefined}
       />
-    </div>
+        </div>
 
-    {selectedDoc && (
-      <RowDetailPanel
-        key={docKey(selectedDoc)}
-        doc={selectedDoc}
-        onClose={() => setSelectedDoc(null)}
-        onFindSimilar={canFindSimilar ? findSimilar : undefined}
-        onQuickFilter={handleQuickFilter}
-        indexing={indexing}
-        focus={focusField}
-      />
-    )}
+        {selectedDoc && (
+          <RowDetailPanel
+            key={docKey(selectedDoc)}
+            doc={selectedDoc}
+            onClose={() => setSelectedDoc(null)}
+            onFindSimilar={canFindSimilar ? findSimilar : undefined}
+            onQuickFilter={handleQuickFilter}
+            indexing={indexing}
+            focus={focusField}
+          />
+        )}
+      </div>
     </div>
   );
 }

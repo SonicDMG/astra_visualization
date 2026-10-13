@@ -5,6 +5,43 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import Sidebar from '@/components/Sidebar';
 import ExplorerState from '@/components/ExplorerState';
 import { ThemeToggle } from '@/components/ThemeToggle';
+import { TraceProvider, useTrace } from '@/lib/trace/TraceContext';
+
+function HeaderTraceToggle() {
+  const { isPanelOpen, togglePanel, currentRun } = useTrace();
+
+  return (
+    <button
+      type="button"
+      onClick={togglePanel}
+      className={`ml-auto mr-3 flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition ${
+        isPanelOpen
+          ? 'bg-sky-500/10 text-sky-400 border-sky-500/40 shadow-sm'
+          : 'hover:bg-slate-800/40'
+      }`}
+      style={{
+        borderColor: isPanelOpen ? undefined : 'var(--astra-border)',
+        background: isPanelOpen ? undefined : 'var(--astra-surface)',
+        color: isPanelOpen ? undefined : 'var(--astra-text)',
+      }}
+      title="Toggle Live Request Trace Panel"
+      aria-label="Toggle Live Request Trace Panel"
+      aria-pressed={isPanelOpen}
+    >
+      <span
+        className={`w-2 h-2 rounded-full ${
+          isPanelOpen ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'
+        }`}
+      />
+      <span>Live Trace</span>
+      {currentRun && isPanelOpen && (
+        <span className="text-[10px] px-1 py-0.2 rounded bg-sky-950 text-sky-300 font-mono">
+          {currentRun.totalMs}ms
+        </span>
+      )}
+    </button>
+  );
+}
 
 function Content() {
   const searchParams = useSearchParams();
@@ -42,6 +79,7 @@ function Content() {
           >
             Astra Data Explorer
           </span>
+          <HeaderTraceToggle />
           <ThemeToggle />
         </header>
 
@@ -108,7 +146,9 @@ export default function Home() {
         </div>
       }
     >
-      <Content />
+      <TraceProvider>
+        <Content />
+      </TraceProvider>
     </Suspense>
   );
 }

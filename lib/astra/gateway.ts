@@ -207,6 +207,12 @@ export type QueryResult = {
   hasNextPage: boolean;
   error?: string;
   errorCode?: string;
+  trace?: Array<{
+    node: 'compile' | 'find' | 'errors';
+    t: number;
+    ms?: number;
+    detail?: Record<string, unknown>;
+  }>;
 };
 
 export type CountResult = {
@@ -222,6 +228,8 @@ export type QueryOptions = {
   projection?: Record<string, 0 | 1>;
   /** Inferred field types (used e.g. for dollarDate conversion). */
   fieldTypes?: Record<string, FieldType>;
+  /** Include server-side execution trace for live tracing visualization. */
+  includeTrace?: boolean;
 };
 
 const SORT_ROW_LIMIT_MESSAGE =
@@ -376,18 +384,34 @@ async function searchQuery(spec: QuerySpec, options: QueryOptions): Promise<Quer
  * Filter / search are wired in later phases.
  */
 export async function query(spec: QuerySpec, options: QueryOptions = {}): Promise<QueryResult> {
+  const reqStart = performance.now();
+  const trace: Array<{
+    node: 'compile' | 'find' | 'errors';
+    t: number;
+    ms?: number;
+    detail?: Record<string, unknown>;
+  }> = [];
+
   if (spec.searchMode !== 'browse') return searchQuery(spec, options);
 
   const sorted = spec.sort.length > 0;
   const skip = spec.pageIndex * spec.pageSize;
 
   if (sorted && skip + spec.pageSize > SORT_MAX_DOCUMENTS) {
+    if (options.includeTrace) {
+      trace.push({
+        node: 'errors',
+        t: Math.round(performance.now() - reqStart),
+        detail: { code: 'SORT_PAGE_BEYOND_LIMIT', limit: SORT_MAX_DOCUMENTS },
+      });
+    }
     return {
       documents: [],
       nextPageState: null,
       hasNextPage: false,
       errorCode: 'SORT_PAGE_BEYOND_LIMIT',
       error: `Sorted results are limited to the first ${SORT_MAX_DOCUMENTS.toLocaleString('en-US')} documents. Go to an earlier page or narrow your filter.`,
+      trace: options.includeTrace ? trace : undefined,
     };
   }
 
@@ -402,21 +426,61 @@ export async function query(spec: QuerySpec, options: QueryOptions = {}): Promis
 
     const filterDoc = buildFindFilter(spec, options.fieldTypes);
 
+    let sortDoc: Record<string, 1 | -1> | undefined;
+    if (sorted) {
+      const compileStart = performance.now();
+      sortDoc = compileSort(spec.sort);
+      const compileMs = Math.round(performance.now() - compileStart);
+      if (options.includeTrace) {
+        trace.push({
+          node: 'compile',
+          t: Math.round(compileStart - reqStart),
+          ms: compileMs,
+          detail: { keys: spec.sort.length },
+        });
+      }
+    }
+
+    const findStart = performance.now();
     const response = await db.command(
       {
         find: {
           filter: filterDoc,
-          ...(sorted ? { sort: compileSort(spec.sort) } : {}),
+          ...(sortDoc ? { sort: sortDoc } : {}),
           projection: options.projection ?? { $vector: 0 },
           options: findOptions,
         },
       },
       { collection: spec.collection },
     );
+    const findMs = Math.round(performance.now() - findStart);
 
     const apiError = mapDataApiErrors(response.errors);
     if (apiError) {
-      return { documents: [], nextPageState: null, hasNextPage: false, ...apiError };
+      if (options.includeTrace) {
+        trace.push({
+          node: 'errors',
+          t: Math.round(findStart - reqStart),
+          ms: findMs,
+          detail: { code: apiError.errorCode },
+        });
+      }
+      return {
+        documents: [],
+        nextPageState: null,
+        hasNextPage: false,
+        ...apiError,
+        trace: options.includeTrace ? trace : undefined,
+      };
+    }
+
+    if (options.includeTrace) {
+      trace.push({
+        node: 'find',
+        t: Math.round(findStart - reqStart),
+        ms: findMs,
+        detail: { count: (response.data as { documents?: unknown[] })?.documents?.length ?? 0 },
+      });
     }
 
     const data = response.data as
@@ -428,10 +492,24 @@ export async function query(spec: QuerySpec, options: QueryOptions = {}): Promis
       documents,
       nextPageState,
       hasNextPage: sorted ? documents.length === spec.pageSize : nextPageState !== null,
+      trace: options.includeTrace ? trace : undefined,
     };
   } catch (err) {
     const apiError = await toApiError(err, 'Failed to query collection');
-    return { documents: [], nextPageState: null, hasNextPage: false, ...apiError };
+    if (options.includeTrace) {
+      trace.push({
+        node: 'errors',
+        t: Math.round(performance.now() - reqStart),
+        detail: { code: apiError.errorCode },
+      });
+    }
+    return {
+      documents: [],
+      nextPageState: null,
+      hasNextPage: false,
+      ...apiError,
+      trace: options.includeTrace ? trace : undefined,
+    };
   }
 }
 
