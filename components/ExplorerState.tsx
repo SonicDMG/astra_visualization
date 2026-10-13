@@ -11,7 +11,9 @@ import { deriveFields, docKey, unwrapScalar } from '@/lib/astra/schema';
 import { displayPath, sortDocumentsLocally } from '@/lib/query/compile';
 import { loadLayout } from '@/lib/ui/columnLayout';
 import {
+  type Condition,
   type FilterTree,
+  type FilterValue,
   type PageSize,
   type QuerySpec,
   type SortKey,
@@ -324,6 +326,19 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     setSelectedDoc((current) => (current !== null && docKey(current) === docKey(doc) ? null : doc));
   }, []);
 
+  const handleQuickFilter = useCallback(
+    (field: string, value: FilterValue) => {
+      const newCondition: Condition = { kind: 'condition', field, op: 'eq', value };
+      const newFilter: FilterTree = {
+        ...spec.filter,
+        children: [...spec.filter.children, newCondition],
+      };
+      applyFilter(newFilter);
+      setIsFilterOpen(true);
+    },
+    [spec.filter, applyFilter],
+  );
+
   const buttonClass =
     'px-3 py-1 text-xs font-medium rounded border disabled:opacity-40 disabled:cursor-not-allowed';
   const buttonStyle = {
@@ -333,7 +348,8 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
   };
 
   return (
-    <div className="flex flex-col h-[calc(100vh-3.5rem)] min-h-0 gap-2 p-4">
+    <div className="flex h-[calc(100vh-3.5rem)] min-h-0">
+    <div className="flex flex-col flex-1 min-w-0 min-h-0 gap-2 p-4">
       {error && (
         <div
           role="alert"
@@ -624,15 +640,18 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
         searchMode={spec.searchMode}
         onFindSimilar={canFindSimilar ? findSimilar : undefined}
       />
+    </div>
 
-      {selectedDoc && (
-        <RowDetailPanel
-          key={docKey(selectedDoc)}
-          doc={selectedDoc}
-          onClose={() => setSelectedDoc(null)}
-          onFindSimilar={canFindSimilar ? findSimilar : undefined}
-        />
-      )}
+    {selectedDoc && (
+      <RowDetailPanel
+        key={docKey(selectedDoc)}
+        doc={selectedDoc}
+        onClose={() => setSelectedDoc(null)}
+        onFindSimilar={canFindSimilar ? findSimilar : undefined}
+        onQuickFilter={handleQuickFilter}
+        indexing={indexing}
+      />
+    )}
     </div>
   );
 }

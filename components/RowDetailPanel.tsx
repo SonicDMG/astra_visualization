@@ -1,7 +1,10 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { unwrapScalar } from '@/lib/astra/schema';
+import { isFieldIndexed, unwrapScalar } from '@/lib/astra/schema';
+import type { CollectionCapabilities } from '@/lib/astra/gateway';
+import { displayPath, escapeFieldSegment } from '@/lib/query/compile';
+import type { FilterValue } from '@/lib/query/types';
 
 type Doc = Record<string, unknown>;
 
@@ -10,10 +13,12 @@ interface RowDetailPanelProps {
   onClose: () => void;
   /** Provided only for vector collections; enables the "Find similar" button. */
   onFindSimilar?: (doc: Doc) => void;
+  /** Adds an `eq` filter for a scalar field. `field` is an escaped dotted path. */
+  onQuickFilter?: (field: string, value: FilterValue) => void;
+  /** Collection indexing options; quick filter is offered only for indexed fields. */
+  indexing?: CollectionCapabilities['indexing'];
 }
 
-/** Height of the app header (Tailwind `h-14`), which the panel sits below. */
-const HEADER_HEIGHT = '3.5rem';
 const PANEL_WIDTH = 480;
 const MAX_CHILDREN = 200;
 
@@ -23,6 +28,24 @@ function isContainer(value: unknown): value is Record<string, unknown> | unknown
 
 function childPath(parent: string, key: string): string {
   return `${parent}/${encodeURIComponent(key)}`;
+}
+
+/** Converts a panel path (`/a/b%2Ec`) to the escaped dotted path used by filters (`a.b&.c`). */
+function panelPathToEscapedField(path: string): string {
+  return path
+    .split('/')
+    .slice(1)
+    .map((segment) => escapeFieldSegment(decodeURIComponent(segment)))
+    .join('.');
+}
+
+function isFilterValue(value: unknown): value is FilterValue {
+  return (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  );
 }
 
 function scalarStyle(value: unknown): React.CSSProperties {
@@ -43,12 +66,46 @@ interface JsonNodeProps {
   path: string;
   expanded: ReadonlySet<string>;
   onToggle: (path: string) => void;
+  /** True when the parent is an array: array indexes are not filterable field paths. */
+  inArray?: boolean;
+  onQuickFilter?: (field: string, value: FilterValue) => void;
+  indexing?: CollectionCapabilities['indexing'];
 }
 
-function JsonNode({ name, value, path, expanded, onToggle }: JsonNodeProps) {
+function JsonNode({
+  name,
+  value,
+  path,
+  expanded,
+  onToggle,
+  inArray,
+  onQuickFilter,
+  indexing,
+}: JsonNodeProps) {
   if (!isContainer(value)) {
+    const field = onQuickFilter !== undefined && !inArray ? panelPathToEscapedField(path) : '';
+    const filterable =
+      onQuickFilter !== undefined &&
+      field !== '' &&
+      isFilterValue(value) &&
+      isFieldIndexed(field, indexing);
+    const label = filterable ? `Filter where ${displayPath(field)} = ${JSON.stringify(value)}` : '';
     return (
-      <div className="py-0.5 pl-4 break-all">
+      <div className="group relative py-0.5 pl-4 break-all">
+        {filterable && (
+          <button
+            type="button"
+            className="absolute left-0 top-0.5 flex h-4 w-4 items-center justify-center rounded opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+            style={{ color: 'var(--astra-accent)' }}
+            title={label}
+            aria-label={label}
+            onClick={() => onQuickFilter(field, value)}
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path d="M1 2h14l-5.5 6.5V14l-3-1.5V8.5L1 2z" />
+            </svg>
+          </button>
+        )}
         <span style={{ color: 'var(--astra-muted)' }}>{name}: </span>
         <span style={scalarStyle(value)}>{JSON.stringify(value) ?? String(value)}</span>
       </div>
@@ -101,6 +158,9 @@ function JsonNode({ name, value, path, expanded, onToggle }: JsonNodeProps) {
                 path={childPath(path, key)}
                 expanded={expanded}
                 onToggle={onToggle}
+                inArray={isArray}
+                onQuickFilter={onQuickFilter}
+                indexing={indexing}
               />
             ))}
             {entries.length > MAX_CHILDREN && (
@@ -124,7 +184,13 @@ function initialExpanded(doc: Doc): Set<string> {
   return paths;
 }
 
-export default function RowDetailPanel({ doc, onClose, onFindSimilar }: RowDetailPanelProps) {
+export default function RowDetailPanel({
+  doc,
+  onClose,
+  onFindSimilar,
+  onQuickFilter,
+  indexing,
+}: RowDetailPanelProps) {
   // Top-level keys start expanded; nested containers start collapsed.
   const [expanded, setExpanded] = useState<Set<string>>(() => initialExpanded(doc));
   const [copied, setCopied] = useState<'json' | 'id' | null>(null);
@@ -169,15 +235,10 @@ export default function RowDetailPanel({ doc, onClose, onFindSimilar }: RowDetai
   return (
     <aside
       aria-label="Row detail"
-      className="flex flex-col border-l shadow-xl"
+      className="flex flex-col flex-shrink-0 min-h-0 border-l"
       style={{
-        position: 'fixed',
-        right: 0,
-        top: HEADER_HEIGHT,
-        height: `calc(100vh - ${HEADER_HEIGHT})`,
         width: PANEL_WIDTH,
-        maxWidth: '100vw',
-        zIndex: 20,
+        maxWidth: '50vw',
         background: 'var(--astra-sidebar)',
         borderColor: 'var(--astra-border)',
         color: 'var(--astra-text)',
@@ -241,6 +302,8 @@ export default function RowDetailPanel({ doc, onClose, onFindSimilar }: RowDetai
             path={childPath('', key)}
             expanded={expanded}
             onToggle={toggle}
+            onQuickFilter={onQuickFilter}
+            indexing={indexing}
           />
         ))}
       </div>
