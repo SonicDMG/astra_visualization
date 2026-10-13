@@ -79,6 +79,20 @@ function Content() {
           >
             Astra Data Explorer
           </span>
+          {collection && (
+            <>
+              <span className="mx-3" style={{ color: 'var(--astra-muted)' }} aria-hidden="true">
+                /
+              </span>
+              <span
+                className="text-base font-medium truncate min-w-0"
+                style={{ color: 'var(--astra-text)' }}
+                title={keyspace ? `${keyspace}.${collection}` : collection}
+              >
+                {collection}
+              </span>
+            </>
+          )}
           <HeaderTraceToggle />
           <ThemeToggle />
         </header>

@@ -375,32 +375,62 @@ interface SidebarProps {
 export default function Sidebar({ urlKeyspace, urlCollection, onCollectionSelect }: SidebarProps) {
   // A keyspace picked in the dropdown wins until the URL names a different one.
   const [picked, setPicked] = useState<{ from: string | null; keyspace: string } | null>(null);
+  const [collapsed, setCollapsed] = useState(false);
   const keyspace = picked && picked.from === urlKeyspace ? picked.keyspace : (urlKeyspace ?? '');
 
   return (
     <aside
-      className="w-64 flex-shrink-0 border-r flex flex-col p-4"
+      className={`${collapsed ? 'w-12 items-center p-2' : 'w-64 p-4'} flex-shrink-0 border-r flex flex-col transition-[width] duration-200`}
       style={{
         background: 'var(--astra-sidebar)',
         borderColor: 'var(--astra-border)',
       }}
     >
-      <KeyspacePicker
-        value={keyspace}
-        onKeyspaceChange={(ks) => setPicked({ from: urlKeyspace, keyspace: ks })}
-      />
-      {keyspace && (
-        <CollectionList
-          keyspace={keyspace}
-          selectedCollection={keyspace === urlKeyspace ? urlCollection : null}
-          onCollectionSelect={onCollectionSelect}
+      <button
+        type="button"
+        onClick={() => setCollapsed((c) => !c)}
+        className={`flex items-center justify-center w-8 h-8 rounded flex-shrink-0 hover:opacity-80 focus:outline-none focus:ring-2 ${
+          collapsed ? '' : 'self-end mb-2'
+        }`}
+        style={{ color: 'var(--astra-muted)' }}
+        aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        aria-expanded={!collapsed}
+        title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+      >
+        <svg
+          className="w-5 h-5"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={2}
+          aria-hidden="true"
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d={collapsed ? 'M13 5l7 7-7 7M5 5l7 7-7 7' : 'M11 19l-7-7 7-7m8 14l-7-7 7-7'}
+          />
+        </svg>
+      </button>
+      {/* Kept mounted (hidden) so keyspace/collection data isn't refetched on expand. */}
+      <div className={collapsed ? 'hidden' : 'flex flex-col flex-1 min-h-0'}>
+        <KeyspacePicker
+          value={keyspace}
+          onKeyspaceChange={(ks) => setPicked({ from: urlKeyspace, keyspace: ks })}
         />
-      )}
-      {!keyspace && (
-        <div className="mt-4 text-sm flex-1 flex items-center justify-center" style={{ color: 'var(--astra-muted)' }}>
-          Select a keyspace to view collections
-        </div>
-      )}
+        {keyspace && (
+          <CollectionList
+            keyspace={keyspace}
+            selectedCollection={keyspace === urlKeyspace ? urlCollection : null}
+            onCollectionSelect={onCollectionSelect}
+          />
+        )}
+        {!keyspace && (
+          <div className="mt-4 text-sm flex-1 flex items-center justify-center" style={{ color: 'var(--astra-muted)' }}>
+            Select a keyspace to view collections
+          </div>
+        )}
+      </div>
     </aside>
   );
 }
