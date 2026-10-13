@@ -1,0 +1,53 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Column Sorting: App to Astra",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/sorting-flow.html",
+    "legend": {
+      "mode": "auto",
+      "entries": {
+        "frontend": { "label": "Grid UI" },
+        "backend": { "label": "App logic" },
+        "security": { "label": "Blocked or error" },
+        "cloud": { "label": "Astra Data API" }
+      }
+    }
+  },
+  "lanes": [
+    { "id": "grid", "label": "Browser: ResultsGrid" },
+    { "id": "state", "label": "Browser: ExplorerState" },
+    { "id": "backend", "label": "Next.js gateway to Astra Data API" }
+  ],
+  "phases": [
+    { "id": "request", "label": "Sort request", "fromCol": 0, "toCol": 2 },
+    { "id": "route", "label": "Where it runs", "fromCol": 3, "toCol": 4, "variant": "emphasis" },
+    { "id": "result", "label": "Result", "fromCol": 5, "toCol": 5, "variant": "dashed" }
+  ],
+  "mainPath": ["click", "gate", "change", "mode", "compile", "find", "render"],
+  "nodes": [
+    { "id": "click", "lane": "grid", "col": 0, "type": "frontend", "label": "Header click", "sublabel": "Shift adds a key", "width": 150 },
+    { "id": "gate", "lane": "grid", "col": 1, "type": "frontend", "label": "Sortable column?", "sublabel": "indexed scalar field", "width": 176 },
+    { "id": "noop", "lane": "grid", "col": 2, "type": "security", "label": "Blocked: no-op", "sublabel": "tooltip says why", "width": 150 },
+    { "id": "render", "lane": "grid", "col": 5, "type": "frontend", "label": "Grid renders page", "sublabel": "numbered pager", "width": 176 },
+    { "id": "change", "lane": "state", "col": 2, "type": "backend", "label": "cycleSort", "sublabel": "asc, desc, off; page 0", "tag": "so= in URL", "width": 150 },
+    { "id": "mode", "lane": "state", "col": 3, "type": "backend", "label": "Search mode?", "sublabel": "browse or ranked", "width": 150 },
+    { "id": "local", "lane": "state", "col": 4, "type": "backend", "label": "Local sort", "sublabel": "loaded results only", "tag": "no refetch", "width": 150 },
+    { "id": "compile", "lane": "backend", "col": 3, "type": "backend", "label": "compileSort", "sublabel": "asc 1, desc -1; skip + limit", "width": 150 },
+    { "id": "find", "lane": "backend", "col": 4, "type": "cloud", "label": "Astra find", "sublabel": "sorts first 10,000", "tag": "no pageState", "width": 150 },
+    { "id": "errors", "lane": "backend", "col": 5, "type": "security", "label": "Error banner", "sublabel": "Clear sort button", "tag": "keeps old rows", "width": 150 }
+  ],
+  "edges": [
+    { "id": "click-gate", "from": "click", "to": "gate", "variant": "default" },
+    { "id": "gate-change", "from": "gate", "to": "change", "label": "allowed", "variant": "emphasis" },
+    { "id": "gate-noop", "from": "gate", "to": "noop", "label": "blocked", "variant": "security", "role": "error" },
+    { "id": "change-mode", "from": "change", "to": "mode", "variant": "default" },
+    { "id": "mode-compile", "from": "mode", "to": "compile", "label": "browse", "variant": "emphasis" },
+    { "id": "mode-local", "from": "mode", "to": "local", "label": "ranked", "variant": "dashed", "role": "branch" },
+    { "id": "compile-find", "from": "compile", "to": "find", "variant": "emphasis" },
+    { "id": "find-render", "from": "find", "to": "render", "label": "documents", "variant": "emphasis", "role": "return", "toSide": "bottom" },
+    { "id": "local-render", "from": "local", "to": "render", "variant": "dashed", "role": "branch" },
+    { "id": "find-errors", "from": "find", "to": "errors", "label": "limit hit", "variant": "security", "role": "error" }
+  ]
+}
