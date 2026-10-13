@@ -240,25 +240,21 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     }
     // Shown (and glowing) while the request is in flight; replaced by the real steps below.
     emitStep({
-      where: 'server',
+      where: 'astra',
       status: 'active',
-      label: 'Create Data API request',
+      label: 'Calling the Data API',
       endpoint: appRequestLabel('/api/query', queryUrl),
       detail: 'Waiting for Astra…',
     });
 
     const requestStart = performance.now();
-    let queryMs = 0;
     let countMs = 0;
     const queryRequest = fetchJson<{
       documents: Doc[];
       nextPageState: string | null;
       hasNextPage: boolean;
       calls?: DataApiCallInfo[];
-    }>(queryPath).then((q) => {
-      queryMs = Math.round(performance.now() - requestStart);
-      return q;
-    });
+    }>(queryPath);
     // Search modes never count: the count is the number of returned results.
     const countRequest: Promise<CountInfo> = isSearch
       ? queryRequest.then((q) => ({
@@ -285,8 +281,6 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
         });
       });
     };
-    const sumMs = (calls: DataApiCallInfo[] | undefined) =>
-      (calls ?? []).reduce((total, call) => total + call.ms, 0);
 
     Promise.all([queryRequest, countRequest])
       .then(([q, c]) => {
@@ -300,14 +294,6 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
         if (isPanelOpen) {
           const rows = q.documents.length;
           const rowText = `${rows.toLocaleString('en-US')} ${rows === 1 ? 'row' : 'rows'}`;
-          emitStep({
-            where: 'server',
-            status: 'ok',
-            label: 'Create Data API request',
-            endpoint: appRequestLabel('/api/query', queryUrl),
-            detail: 'Turns the sort, filter and paging into a Data API command',
-            durationMs: Math.max(queryMs - sumMs(q.calls), 0),
-          });
           emitCalls(q.calls, 'error');
           if (!isSearch) {
             if (c.calls?.length) {
@@ -346,16 +332,6 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
               detail: 'This page is past the first 10,000 sorted documents, so no Data API call was made.',
             });
           } else {
-            emitStep({
-              where: 'server',
-              status: 'ok',
-              label: 'Create Data API request',
-              endpoint: appRequestLabel('/api/query', queryUrl),
-              durationMs: Math.max(
-                Math.round(performance.now() - requestStart) - sumMs(calls),
-                0,
-              ),
-            });
             if (calls.length > 0) {
               emitCalls(calls, 'error');
             } else {
