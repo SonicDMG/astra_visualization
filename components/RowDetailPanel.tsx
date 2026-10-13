@@ -3,7 +3,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { isFieldIndexed, unwrapScalar } from '@/lib/astra/schema';
 import type { CollectionCapabilities } from '@/lib/astra/gateway';
-import { displayPath, escapeFieldSegment } from '@/lib/query/compile';
+import {
+  displayPath,
+  escapeFieldSegment,
+  splitEscapedPath,
+  unescapeFieldSegment,
+} from '@/lib/query/compile';
 import type { FilterValue } from '@/lib/query/types';
 
 type Doc = Record<string, unknown>;
@@ -17,6 +22,11 @@ interface RowDetailPanelProps {
   onQuickFilter?: (field: string, value: FilterValue) => void;
   /** Collection indexing options; quick filter is offered only for indexed fields. */
   indexing?: CollectionCapabilities['indexing'];
+  /**
+   * Field to reveal (escaped dotted path). Pass a new object identity each time to
+   * re-trigger even when clicking the same field on the same row.
+   */
+  focus?: { field: string } | null;
 }
 
 const PANEL_WIDTH = 480;
@@ -28,6 +38,22 @@ function isContainer(value: unknown): value is Record<string, unknown> | unknown
 
 function childPath(parent: string, key: string): string {
   return `${parent}/${encodeURIComponent(key)}`;
+}
+
+/** Panel paths from the top-level key down to the (escaped dotted) field, one per segment. */
+function fieldToPanelPaths(field: string): string[] {
+  let current = '';
+  return splitEscapedPath(field).map((segment) => {
+    current = childPath(current, unescapeFieldSegment(segment));
+    return current;
+  });
+}
+
+/** Returns `expanded` plus every ancestor of `field` (and the field itself, if a container). */
+function expandToField(expanded: ReadonlySet<string>, field: string): Set<string> {
+  const next = new Set(expanded);
+  for (const path of fieldToPanelPaths(field)) next.add(path);
+  return next;
 }
 
 /** Converts a panel path (`/a/b%2Ec`) to the escaped dotted path used by filters (`a.b&.c`). */
@@ -133,7 +159,7 @@ function JsonNode({
       isFieldIndexed(field, indexing);
     const label = filterable ? `Filter where ${displayPath(field)} = ${JSON.stringify(value)}` : '';
     return (
-      <div className="group relative py-0.5 pl-4 break-all">
+      <div data-path={path} className="group relative py-0.5 pl-4 break-all">
         {filterable && (
           <button
             type="button"
@@ -162,7 +188,7 @@ function JsonNode({
 
   if (entries.length === 0) {
     return (
-      <div className="py-0.5 pl-4">
+      <div data-path={path} className="py-0.5 pl-4">
         <span style={{ color: 'var(--astra-muted)' }}>{name}: </span>
         <span>
           {open}
@@ -176,7 +202,7 @@ function JsonNode({
   const summary = `${entries.length} ${isArray ? (entries.length === 1 ? 'item' : 'items') : entries.length === 1 ? 'key' : 'keys'}`;
 
   return (
-    <div>
+    <div data-path={path}>
       <button
         type="button"
         className="flex items-center gap-1 py-0.5 text-left"
@@ -232,10 +258,41 @@ export default function RowDetailPanel({
   onFindSimilar,
   onQuickFilter,
   indexing,
+  focus = null,
 }: RowDetailPanelProps) {
-  // Top-level keys start expanded; nested containers start collapsed.
-  const [expanded, setExpanded] = useState<Set<string>>(() => initialExpanded(doc));
+  // Top-level keys start expanded; nested containers start collapsed (unless a field is focused).
+  const [expanded, setExpanded] = useState<Set<string>>(() =>
+    focus ? expandToField(initialExpanded(doc), focus.field) : initialExpanded(doc),
+  );
   const [view, setView] = useState<'tree' | 'raw'>('tree');
+  const bodyRef = useRef<HTMLDivElement>(null);
+
+  // A new focus on the already-open row: show the field tree and expand down to the field.
+  const [appliedFocus, setAppliedFocus] = useState(focus);
+  if (focus !== appliedFocus) {
+    setAppliedFocus(focus);
+    if (focus) {
+      setView('tree');
+      setExpanded((prev) => expandToField(prev, focus.field));
+    }
+  }
+
+  useEffect(() => {
+    if (!focus) return;
+    const paths = fieldToPanelPaths(focus.field);
+    const target = paths[paths.length - 1];
+    const nodes = bodyRef.current?.querySelectorAll<HTMLElement>('[data-path]');
+    const el = nodes && Array.from(nodes).find((node) => node.dataset.path === target);
+    if (!el) return; // e.g. the column is not present in this document
+    el.scrollIntoView({ block: 'center' });
+    el.animate?.(
+      [
+        { backgroundColor: 'color-mix(in srgb, var(--astra-accent) 35%, transparent)' },
+        { backgroundColor: 'transparent' },
+      ],
+      { duration: 1500, easing: 'ease-out' },
+    );
+  }, [focus]);
   const [copied, setCopied] = useState<'json' | 'id' | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -360,7 +417,7 @@ export default function RowDetailPanel({
       </div>
 
       {view === 'tree' ? (
-        <div className="flex-1 min-h-0 overflow-auto p-3 font-mono text-xs">
+        <div ref={bodyRef} className="flex-1 min-h-0 overflow-auto p-3 font-mono text-xs">
           {Object.entries(doc).map(([key, value]) => (
             <JsonNode
               key={key}

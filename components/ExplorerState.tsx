@@ -110,6 +110,8 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
   const [error, setError] = useState<{ message: string; code: string | null } | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
   const [selectedDoc, setSelectedDoc] = useState<Doc | null>(null);
+  // Field to reveal in the detail panel after a cell click (new object per click).
+  const [focusField, setFocusField] = useState<{ field: string } | null>(null);
   // $vector is excluded from fetches unless its column is made visible in the grid.
   const [showVector, setShowVector] = useState(
     () => loadLayout(keyspace, collection).columnVisibility.$vector === true,
@@ -323,7 +325,14 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
 
   const handleRowClick = useCallback((doc: Doc) => {
     // Clicking the open row again closes the panel.
+    setFocusField(null);
     setSelectedDoc((current) => (current !== null && docKey(current) === docKey(doc) ? null : doc));
+  }, []);
+
+  // Clicking a cell opens the row (never closes it) and reveals that column's field.
+  const handleCellClick = useCallback((doc: Doc, field: string) => {
+    setSelectedDoc(doc);
+    setFocusField({ field });
   }, []);
 
   const handleQuickFilter = useCallback(
@@ -635,6 +644,7 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
         onSortChange={changeSort}
         indexing={indexing}
         onRowClick={handleRowClick}
+        onCellClick={handleCellClick}
         selectedKey={selectedDoc ? docKey(selectedDoc) : null}
         onShowVectorChange={setShowVector}
         searchMode={spec.searchMode}
@@ -650,6 +660,7 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
         onFindSimilar={canFindSimilar ? findSimilar : undefined}
         onQuickFilter={handleQuickFilter}
         indexing={indexing}
+        focus={focusField}
       />
     )}
     </div>

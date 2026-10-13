@@ -45,6 +45,8 @@ interface ResultsGridProps {
   indexing?: CollectionCapabilities['indexing'];
   /** Called with the clicked row's document. */
   onRowClick?: (doc: Doc) => void;
+  /** Called with the clicked row's document and the clicked column's escaped field path. */
+  onCellClick?: (doc: Doc, field: string) => void;
   /** `docKey` of the row currently shown in the detail panel (highlighted). */
   selectedKey?: string | null;
   /** Called whenever the `$vector` column is shown/hidden so the parent can re-fetch. */
@@ -270,6 +272,7 @@ interface GridTableProps {
   ui: ReadonlyMap<string, ColumnUiInfo>;
   selectedKey: string | null;
   onRowClick?: (doc: Doc) => void;
+  onCellClick?: (doc: Doc, field: string) => void;
   onToggleExpand: (escapedPath: string) => void;
   onReorder: (fromId: string, toId: string) => void;
   /** Header click; `additive` is true for Shift-click. Never called for blocked columns. */
@@ -284,6 +287,7 @@ function GridTable({
   ui,
   selectedKey,
   onRowClick,
+  onCellClick,
   onToggleExpand,
   onReorder,
   onHeaderSort,
@@ -550,6 +554,14 @@ function GridTable({
                         ...sticky,
                         ...(pinned && selected ? { background: 'var(--astra-surface)' } : {}),
                       }}
+                      onClick={
+                        onCellClick
+                          ? (e) => {
+                              e.stopPropagation();
+                              onCellClick(row.original, cell.column.id);
+                            }
+                          : undefined
+                      }
                     >
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </td>
@@ -681,6 +693,7 @@ export default function ResultsGrid({
   onSortChange,
   indexing,
   onRowClick,
+  onCellClick,
   selectedKey = null,
   onShowVectorChange,
   searchMode = 'browse',
@@ -791,6 +804,7 @@ export default function ResultsGrid({
           ui={built.ui}
           selectedKey={selectedKey}
           onRowClick={onRowClick}
+          onCellClick={onCellClick}
           onToggleExpand={toggleExpand}
           onReorder={reorder}
           onHeaderSort={handleHeaderSort}
