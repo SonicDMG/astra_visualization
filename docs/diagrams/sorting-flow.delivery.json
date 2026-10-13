@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "9e1ab0e6-6286-4d24-9059-000a524baf82",
+  "status": "current",
+  "command": "deliver",
+  "type": "workflow",
+  "input": "/Users/davidjones-gilardi/astra_visualization/docs/diagrams/sorting-flow.workflow.json",
+  "output": "/Users/davidjones-gilardi/astra_visualization/docs/diagrams/sorting-flow.html",
+  "specification": {
+    "sha256": "2fba666633c591ea79f769703fe267542d5633bec81db7cec17234022588a09f",
+    "bytes": 3646
+  },
+  "artifact": {
+    "sha256": "46ceaba7b4e537fb605cb5dd5119fb2b075ce4d592c761bd24cc16e9d7ebcfee",
+    "bytes": 823081
+  }
+}
