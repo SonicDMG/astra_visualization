@@ -193,6 +193,7 @@ export default function RowDetailPanel({
 }: RowDetailPanelProps) {
   // Top-level keys start expanded; nested containers start collapsed.
   const [expanded, setExpanded] = useState<Set<string>>(() => initialExpanded(doc));
+  const [view, setView] = useState<'tree' | 'raw'>('tree');
   const [copied, setCopied] = useState<'json' | 'id' | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -293,20 +294,49 @@ export default function RowDetailPanel({
         </button>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-auto p-3 font-mono text-xs">
-        {Object.entries(doc).map(([key, value]) => (
-          <JsonNode
-            key={key}
-            name={key}
-            value={value}
-            path={childPath('', key)}
-            expanded={expanded}
-            onToggle={toggle}
-            onQuickFilter={onQuickFilter}
-            indexing={indexing}
-          />
+      <div
+        className="flex gap-1 border-b px-3 py-1.5"
+        style={{ borderColor: 'var(--astra-border)' }}
+        role="group"
+        aria-label="Row detail view"
+      >
+        {(['tree', 'raw'] as const).map((mode) => (
+          <button
+            key={mode}
+            type="button"
+            className={`px-2 py-0.5 text-xs font-medium rounded ${view === mode ? 'text-white' : ''}`}
+            style={{
+              background: view === mode ? 'var(--astra-accent)' : 'var(--astra-surface)',
+              color: view === mode ? undefined : 'var(--astra-muted)',
+            }}
+            aria-pressed={view === mode}
+            onClick={() => setView(mode)}
+          >
+            {mode === 'tree' ? 'Fields' : 'Raw JSON'}
+          </button>
         ))}
       </div>
+
+      {view === 'tree' ? (
+        <div className="flex-1 min-h-0 overflow-auto p-3 font-mono text-xs">
+          {Object.entries(doc).map(([key, value]) => (
+            <JsonNode
+              key={key}
+              name={key}
+              value={value}
+              path={childPath('', key)}
+              expanded={expanded}
+              onToggle={toggle}
+              onQuickFilter={onQuickFilter}
+              indexing={indexing}
+            />
+          ))}
+        </div>
+      ) : (
+        <pre className="flex-1 min-h-0 overflow-auto p-3 font-mono text-xs whitespace-pre-wrap break-all">
+          {JSON.stringify(doc, null, 2)}
+        </pre>
+      )}
     </aside>
   );
 }

@@ -686,7 +686,6 @@ export default function ResultsGrid({
   searchMode = 'browse',
   onFindSimilar,
 }: ResultsGridProps) {
-  const [view, setView] = useState<'table' | 'json'>('table');
   // Restored from localStorage on mount (parent remounts this component per collection).
   const [layout, setLayout] = useState<ColumnLayout>(() => loadLayout(keyspace, collection));
 
@@ -776,46 +775,17 @@ export default function ResultsGrid({
     table.setColumnOrder(ids);
   };
 
-  const tabClass = (active: boolean) =>
-    `px-3 py-1 text-xs font-medium rounded ${active ? 'text-white' : ''}`;
-
   return (
     <div className="flex flex-col flex-1 min-h-0 gap-2">
       <div className="flex items-center gap-1">
-        <div className="flex gap-1" role="group" aria-label="Result view">
-          <button
-            type="button"
-            className={tabClass(view === 'table')}
-            style={{
-              background: view === 'table' ? 'var(--astra-accent)' : 'var(--astra-surface)',
-              color: view === 'table' ? undefined : 'var(--astra-muted)',
-            }}
-            aria-pressed={view === 'table'}
-            onClick={() => setView('table')}
-          >
-            Table
-          </button>
-          <button
-            type="button"
-            className={tabClass(view === 'json')}
-            style={{
-              background: view === 'json' ? 'var(--astra-accent)' : 'var(--astra-surface)',
-              color: view === 'json' ? undefined : 'var(--astra-muted)',
-            }}
-            aria-pressed={view === 'json'}
-            onClick={() => setView('json')}
-          >
-            JSON
-          </button>
-        </div>
-        {view === 'table' && <ColumnsMenu table={table} />}
+        <ColumnsMenu table={table} />
       </div>
 
       {documents.length === 0 ? (
         <p className="text-sm" style={{ color: 'var(--astra-muted)' }}>
           No documents.
         </p>
-      ) : view === 'table' ? (
+      ) : (
         <GridTable
           table={table}
           ui={built.ui}
@@ -827,17 +797,6 @@ export default function ResultsGrid({
           localSort={searchMode !== 'browse'}
           onFindSimilar={onFindSimilar}
         />
-      ) : (
-        <pre
-          className="flex-1 min-h-0 overflow-auto rounded-lg border p-4 text-xs font-mono"
-          style={{
-            borderColor: 'var(--astra-border)',
-            background: 'var(--astra-surface)',
-            color: 'var(--astra-text)',
-          }}
-        >
-          {JSON.stringify(documents, null, 2)}
-        </pre>
       )}
     </div>
   );
