@@ -150,7 +150,7 @@ export function SortingFlowDiagram({
         .sorting-diagram-wrapper svg {
           display: block;
           width: 100%;
-          height: auto;
+          height: 100%;
         }
 
         .c-grid { stroke: var(--grid); fill: none; }
@@ -198,7 +198,7 @@ export function SortingFlowDiagram({
         /* Dynamic live trace styling */
         g[data-node-id] {
           cursor: pointer;
-          transition: transform 150ms ease, opacity 200ms ease;
+          transition: opacity 200ms ease;
         }
 
         g[data-node-id]:hover {
@@ -253,10 +253,9 @@ export function SortingFlowDiagram({
 
         @keyframes trace-node-pulse {
           from {
-            transform: scale(1);
+            filter: drop-shadow(0 0 4px currentColor);
           }
           to {
-            transform: scale(1.03);
             filter: drop-shadow(0 0 12px currentColor);
           }
         }

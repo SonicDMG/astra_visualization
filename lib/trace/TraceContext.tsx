@@ -45,16 +45,20 @@ const MAX_HISTORY = 15;
 const FADE_DELAY_MS = 3000;
 
 export function TraceProvider({ children }: { children: React.ReactNode }) {
-  const [isPanelOpen, setPanelOpenState] = useState<boolean>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        return localStorage.getItem('astra_explorer_trace_open') === 'true';
-      } catch {
-        return false;
+  // Starts closed on server and client alike; the saved preference is applied after mount so
+  // hydration matches.
+  const [isPanelOpen, setPanelOpenState] = useState<boolean>(false);
+
+  useEffect(() => {
+    try {
+      if (localStorage.getItem('astra_explorer_trace_open') === 'true') {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setPanelOpenState(true);
       }
+    } catch {
+      // ignore
     }
-    return false;
-  });
+  }, []);
   const [currentRun, setCurrentRun] = useState<TraceRun | null>(null);
   const [history, setHistory] = useState<TraceRun[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<SortingNodeId | null>(null);

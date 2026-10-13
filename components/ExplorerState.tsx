@@ -122,7 +122,10 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   // pageIndex -> pageState used to load that page, so Previous can step back.
   const pageStateHistory = useRef<Map<number, string | null>>(new Map());
-  const { isPanelOpen, currentRun, startRun, emitStep, finishRun } = useTrace();
+  const { isPanelOpen, startRun, emitStep, finishRun } = useTrace();
+  // Identifies the sort/page/refresh a trace run was started for, so refetches caused by anything
+  // else (e.g. field types arriving) continue that run instead of starting another.
+  const lastTracedRunKeyRef = useRef<string | null>(null);
 
   const paramsString = searchParams.toString();
   const spec: QuerySpec = useMemo(
@@ -181,7 +184,9 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     setLoading(true);
     const traceQueryParam = isPanelOpen ? '&trace=1' : '';
 
-    if (isPanelOpen && !isSearch && spec.sort.length > 0 && !currentRun) {
+    const runKey = `${JSON.stringify(spec.sort)}|${spec.pageIndex}|${refreshToken}`;
+    if (isPanelOpen && !isSearch && spec.sort.length > 0 && lastTracedRunKeyRef.current !== runKey) {
+      lastTracedRunKeyRef.current = runKey;
       startRun({
         sortSpec: spec.sort.map((k) => ({ field: k.field, dir: k.dir })),
         searchMode: 'browse',
@@ -327,7 +332,6 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     isPanelOpen,
     spec.sort,
     spec.pageIndex,
-    currentRun,
     startRun,
     emitStep,
     finishRun,

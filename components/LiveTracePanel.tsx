@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTrace } from '@/lib/trace/TraceContext';
 import { SortingFlowDiagram } from './SortingFlowDiagram';
 import type { SortingNodeId, TraceRun } from '@/lib/trace/types';
@@ -58,6 +58,12 @@ const NODE_DESCRIPTIONS: Record<SortingNodeId, { name: string; role: string; loc
   },
 };
 
+const APP_HEADER_PX = 56; // h-14 app header above the explorer
+const MIN_PANEL_PX = 220;
+const DEFAULT_PANEL_PX = 420;
+const MIN_REMAINING_PX = 160; // always leave room for the results grid
+const KEY_STEP_PX = 24;
+
 export default function LiveTracePanel() {
   const {
     isPanelOpen,
@@ -71,6 +77,51 @@ export default function LiveTracePanel() {
   } = useTrace();
 
   const [inspectRunId, setInspectRunId] = useState<string | null>(null);
+  const [panelHeight, setPanelHeight] = useState(DEFAULT_PANEL_PX);
+  const [isResizing, setIsResizing] = useState(false);
+  const dragRef = useRef<{ startY: number; startHeight: number } | null>(null);
+
+  const clampHeight = useCallback((h: number) => {
+    const max = Math.max(MIN_PANEL_PX, window.innerHeight - APP_HEADER_PX - MIN_REMAINING_PX);
+    return Math.min(max, Math.max(MIN_PANEL_PX, h));
+  }, []);
+
+  // Keep the panel inside the viewport when the window shrinks.
+  useEffect(() => {
+    const onResize = () => setPanelHeight((h) => clampHeight(h));
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [clampHeight]);
+
+  const onHandlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    dragRef.current = { startY: e.clientY, startHeight: panelHeight };
+    setIsResizing(true);
+  };
+
+  const onHandlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    setPanelHeight(clampHeight(drag.startHeight + (e.clientY - drag.startY)));
+  };
+
+  const onHandlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    dragRef.current = null;
+    setIsResizing(false);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+  };
+
+  const onHandleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setPanelHeight((h) => clampHeight(h - KEY_STEP_PX));
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setPanelHeight((h) => clampHeight(h + KEY_STEP_PX));
+    }
+  };
 
   if (!isPanelOpen) return null;
 
@@ -93,8 +144,9 @@ export default function LiveTracePanel() {
   return (
     <section
       aria-label="Live Sorting Trace"
-      className="flex flex-col flex-shrink-0 border-b select-none transition-all duration-200 overflow-hidden"
+      className="relative flex flex-col flex-shrink-0 border-b select-none overflow-hidden"
       style={{
+        height: panelHeight,
         background: 'var(--astra-sidebar)',
         borderColor: 'var(--astra-border)',
         color: 'var(--astra-text)',
@@ -162,11 +214,11 @@ export default function LiveTracePanel() {
       </div>
 
       {/* Main Horizontal Content Area */}
-      <div className="flex flex-col lg:flex-row gap-4 p-4 max-h-[460px] overflow-hidden">
+      <div className="flex flex-col lg:flex-row gap-4 p-4 flex-1 min-h-0 overflow-hidden">
         {/* Left Column: Wide Diagram Section */}
-        <div className="flex-1 min-w-0 flex flex-col gap-2">
+        <div className="flex-1 min-w-0 min-h-0 flex flex-col gap-2">
           <div
-            className="rounded border p-2 flex items-center justify-center overflow-hidden"
+            className="flex-1 min-h-0 rounded border p-2 flex items-center justify-center overflow-hidden"
             style={{ borderColor: 'var(--astra-border)', background: 'var(--astra-bg)' }}
           >
             <SortingFlowDiagram
@@ -176,7 +228,7 @@ export default function LiveTracePanel() {
               completedEdgeIds={completedEdges}
               nodeStatuses={nodeStatuses}
               nodeTimings={nodeTimings}
-              className="max-h-[300px] w-full"
+              className="h-full w-full"
               onNodeClick={(nodeId) =>
                 setSelectedNodeId(selectedNodeId === nodeId ? null : nodeId)
               }
@@ -224,10 +276,7 @@ export default function LiveTracePanel() {
         </div>
 
         {/* Right Column: Execution Timeline, Details & History */}
-        <div
-          className="w-full lg:w-96 flex-shrink-0 flex flex-col gap-3 overflow-y-auto pr-1"
-          style={{ maxHeight: '360px' }}
-        >
+        <div className="w-full lg:w-96 flex-shrink-0 min-h-0 flex flex-col gap-3 overflow-y-auto pr-1 max-lg:max-h-40">
           {/* Active Request Details */}
           <div
             className="p-2.5 rounded border text-xs font-mono flex flex-col gap-1 flex-shrink-0"
@@ -370,6 +419,27 @@ export default function LiveTracePanel() {
             )}
           </div>
         </div>
+      </div>
+
+      {/* Drag handle: resize the panel height (also ArrowUp/ArrowDown when focused) */}
+      <div
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize live trace panel"
+        aria-valuenow={Math.round(panelHeight)}
+        aria-valuemin={MIN_PANEL_PX}
+        tabIndex={0}
+        className="absolute left-0 right-0 bottom-0 h-2 cursor-row-resize touch-none flex items-center justify-center focus:outline-none group"
+        onPointerDown={onHandlePointerDown}
+        onPointerMove={onHandlePointerMove}
+        onPointerUp={onHandlePointerUp}
+        onPointerCancel={onHandlePointerUp}
+        onKeyDown={onHandleKeyDown}
+      >
+        <span
+          className="h-1 w-12 rounded-full transition-colors group-hover:bg-sky-400 group-focus-visible:bg-sky-400"
+          style={{ background: isResizing ? 'var(--astra-accent)' : 'var(--astra-border)' }}
+        />
       </div>
     </section>
   );
