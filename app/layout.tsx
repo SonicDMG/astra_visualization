@@ -17,6 +17,9 @@ export const metadata: Metadata = {
   description: 'Explore your DataStax Astra DB data',
 };
 
+// Runs before first paint: applies the saved theme (default dark) to avoid a flash.
+const themeInitScript = `try{if(localStorage.getItem('astra-theme')==='light')document.documentElement.classList.add('light')}catch(e){}`;
+
 export default function RootLayout({ children }: LayoutProps<'/'>) {
   return (
     <html
@@ -24,6 +27,9 @@ export default function RootLayout({ children }: LayoutProps<'/'>) {
       className={`${geistSans.variable} ${geistMono.variable} dark`}
       suppressHydrationWarning
     >
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+      </head>
       <body className="min-h-screen antialiased">{children}</body>
     </html>
   );

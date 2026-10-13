@@ -106,8 +106,12 @@ export interface CollectionCapabilities {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+// Endpoint form: https://<DB_ID>-<region>.apps.astra.datastax.com, where DB_ID is a
+// UUID (8-4-4-4-12 hex), so it contains dashes itself.
 function parseDbId(endpoint: string): string | null {
-  const match = endpoint.match(/https:\/\/([^-]+)-[^.]+\.apps\.astra\.datastax\.com/);
+  const match = endpoint.match(
+    /^https:\/\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})-[a-z0-9-]+\.apps\.astra\.datastax\.com/,
+  );
   return match?.[1] ?? null;
 }
 
@@ -467,9 +471,10 @@ export async function count(
       const filterDoc = buildFindFilter(spec, options?.fieldTypes);
       const response = await db.command(
         {
+          // No `options`: this Data API rejects any options on countDocuments.
+          // The count is capped server-side at 1000; `moreData` signals "1,000+".
           countDocuments: {
             filter: filterDoc,
-            options: { upperBound: 1000 },
           },
         },
         { collection: spec.collection },

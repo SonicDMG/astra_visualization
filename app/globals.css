@@ -35,6 +35,20 @@
   --radius: 0.5rem;
 }
 
+/* ─── Light theme (toggle sets `light` on <html>; dark is the default) ────── */
+html.light {
+  --astra-bg: #f7f8fb;
+  --astra-sidebar: #eceef4;
+  --astra-surface: #ffffff;
+  --astra-border: #d5d8e3;
+  --astra-accent: #0b6fd6;
+  --astra-accent-hover: #0a5fb8;
+  --astra-text: #1b1d2a;
+  --astra-muted: #5d6279;
+  --astra-error: #c62828;
+  color-scheme: light;
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -42,7 +56,8 @@
   --font-mono: var(--font-geist-mono);
 }
 
-/* Force dark — no white flash on load */
+/* Dark by default; a pre-paint script in layout.tsx applies the saved theme
+   so there is no flash on load. */
 html {
   overflow-x: hidden;
   color-scheme: dark;

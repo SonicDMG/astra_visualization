@@ -43,9 +43,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
 
   // `sv=1` opts in to the (large) $vector field. A bare `{ $vector: 1 }` would
-  // turn the projection into an include-list, so include all other fields via `*`.
+  // turn the projection into an include-list, and the Data API rejects `*` combined
+  // with other paths, so `{ '*': 1 }` alone (which also returns $vector) is used.
   const projection: Record<string, 0 | 1> | undefined =
-    params.get('sv') === '1' ? { '*': 1, $vector: 1 } : undefined;
+    params.get('sv') === '1' ? { '*': 1 } : undefined;
 
   const result = await query(spec, { projection, fieldTypes });
   if (result.error) {

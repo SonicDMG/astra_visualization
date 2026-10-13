@@ -5,11 +5,12 @@ import { vectorLabel, vectorizeLabel } from '@/lib/astra/schema';
 import type { CollectionDescriptor, CollectionCapabilities } from '@/lib/astra/gateway';
 
 interface KeyspacePickerProps {
+  value: string;
   onKeyspaceChange: (keyspace: string) => void;
   disabled?: boolean;
 }
 
-export function KeyspacePicker({ onKeyspaceChange, disabled = false }: KeyspacePickerProps) {
+export function KeyspacePicker({ value, onKeyspaceChange, disabled = false }: KeyspacePickerProps) {
   const [keyspaces, setKeyspaces] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -90,7 +91,7 @@ export function KeyspacePicker({ onKeyspaceChange, disabled = false }: KeyspaceP
       }}
       onChange={(e) => onKeyspaceChange(e.target.value)}
       disabled={disabled || keyspaces.length === 0}
-      defaultValue=""
+      value={value}
     >
       <option value="" disabled>
         Select a keyspace
@@ -221,10 +222,11 @@ function CollectionBadge({ caps }: CollectionBadgeProps) {
 
 interface CollectionListProps {
   keyspace: string;
+  selectedCollection: string | null;
   onCollectionSelect: (keyspace: string, collectionName: string) => void;
 }
 
-export function CollectionList({ keyspace, onCollectionSelect }: CollectionListProps) {
+export function CollectionList({ keyspace, selectedCollection, onCollectionSelect }: CollectionListProps) {
   const [collections, setCollections] = useState<CollectionDescriptor[]>([]);
   const [tables, setTables] = useState<{ name: string }[]>([]);
   const [loading, setLoading] = useState(true);
@@ -325,9 +327,10 @@ export function CollectionList({ keyspace, onCollectionSelect }: CollectionListP
           <li key={col.name}>
             <button
               className="w-full text-left rounded px-3 py-2 text-sm transition-colors hover:bg-opacity-10 focus:outline-none focus:ring-2 focus:ring-inset"
+              aria-current={col.name === selectedCollection ? 'true' : undefined}
               style={{
                 color: 'var(--astra-text)',
-                backgroundColor: 'transparent',
+                backgroundColor: col.name === selectedCollection ? 'var(--astra-surface)' : 'transparent',
                 borderColor: 'var(--astra-border)',
               }}
               onClick={() => onCollectionSelect(keyspace, col.name)}
@@ -363,11 +366,16 @@ export function CollectionList({ keyspace, onCollectionSelect }: CollectionListP
 }
 
 interface SidebarProps {
+  /** Keyspace/collection currently in the URL, so a reload or shared link restores the sidebar. */
+  urlKeyspace: string | null;
+  urlCollection: string | null;
   onCollectionSelect: (keyspace: string, collectionName: string) => void;
 }
 
-export default function Sidebar({ onCollectionSelect }: SidebarProps) {
-  const [keyspace, setKeyspace] = useState('');
+export default function Sidebar({ urlKeyspace, urlCollection, onCollectionSelect }: SidebarProps) {
+  // A keyspace picked in the dropdown wins until the URL names a different one.
+  const [picked, setPicked] = useState<{ from: string | null; keyspace: string } | null>(null);
+  const keyspace = picked && picked.from === urlKeyspace ? picked.keyspace : (urlKeyspace ?? '');
 
   return (
     <aside
@@ -377,9 +385,16 @@ export default function Sidebar({ onCollectionSelect }: SidebarProps) {
         borderColor: 'var(--astra-border)',
       }}
     >
-      <KeyspacePicker onKeyspaceChange={setKeyspace} />
+      <KeyspacePicker
+        value={keyspace}
+        onKeyspaceChange={(ks) => setPicked({ from: urlKeyspace, keyspace: ks })}
+      />
       {keyspace && (
-        <CollectionList keyspace={keyspace} onCollectionSelect={onCollectionSelect} />
+        <CollectionList
+          keyspace={keyspace}
+          selectedCollection={keyspace === urlKeyspace ? urlCollection : null}
+          onCollectionSelect={onCollectionSelect}
+        />
       )}
       {!keyspace && (
         <div className="mt-4 text-sm flex-1 flex items-center justify-center" style={{ color: 'var(--astra-muted)' }}>

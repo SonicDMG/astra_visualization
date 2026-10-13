@@ -9,6 +9,9 @@ const UNPROCESSABLE_CODES: ReadonlySet<string> = new Set([
   'TOO_MANY_CONDITIONS',
   'MISSING_VALUE',
   'INVALID_DATE',
+  // Data API rejections of the user's own query (seen live against walfly).
+  'FILTER_PATH_UNINDEXED',
+  'SORT_CLAUSE_PATH_UNINDEXED',
 ]);
 
 /** Invalid search requests, pre-validated in the gateway before anything reaches Astra (400). */

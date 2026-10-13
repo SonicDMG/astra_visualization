@@ -4,6 +4,7 @@ import { Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import Sidebar from '@/components/Sidebar';
 import ExplorerState from '@/components/ExplorerState';
+import { ThemeToggle } from '@/components/ThemeToggle';
 
 function Content() {
   const searchParams = useSearchParams();
@@ -21,7 +22,11 @@ function Content() {
 
   return (
     <div className="flex h-screen overflow-hidden">
-      <Sidebar onCollectionSelect={handleCollectionSelect} />
+      <Sidebar
+        urlKeyspace={keyspace}
+        urlCollection={collection}
+        onCollectionSelect={handleCollectionSelect}
+      />
 
       <div className="flex flex-col flex-1 overflow-hidden">
         <header
@@ -37,6 +42,7 @@ function Content() {
           >
             Astra Data Explorer
           </span>
+          <ThemeToggle />
         </header>
 
         <main
