@@ -55,6 +55,48 @@ function scalarStyle(value: unknown): React.CSSProperties {
   return { color: '#ffa657' };
 }
 
+const JSON_TOKEN =
+  /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false)\b|\b(null)\b|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g;
+
+/** Pretty-prints a value as indented, syntax-highlighted JSON (React nodes, no raw HTML). */
+function highlightJson(value: unknown): React.ReactNode[] {
+  const text = JSON.stringify(value, null, 2) ?? '';
+  const nodes: React.ReactNode[] = [];
+  let last = 0;
+  for (const match of text.matchAll(JSON_TOKEN)) {
+    const [token, str, colon, bool, nul, num] = match;
+    const start = match.index ?? 0;
+    if (start > last) nodes.push(text.slice(last, start));
+    if (str !== undefined && colon !== undefined) {
+      nodes.push(
+        <span key={start} style={{ color: 'var(--astra-text)' }}>
+          {str}
+        </span>,
+        colon,
+      );
+    } else {
+      const style =
+        str !== undefined
+          ? scalarStyle('')
+          : bool !== undefined
+            ? scalarStyle(true)
+            : nul !== undefined
+              ? scalarStyle(null)
+              : num !== undefined
+                ? scalarStyle(0)
+                : undefined;
+      nodes.push(
+        <span key={start} style={style}>
+          {token}
+        </span>,
+      );
+    }
+    last = start + token.length;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+}
+
 function idToString(id: unknown): string {
   const scalar = unwrapScalar(id);
   return typeof scalar === 'object' && scalar !== null ? JSON.stringify(scalar) : String(scalar);
@@ -333,9 +375,21 @@ export default function RowDetailPanel({
           ))}
         </div>
       ) : (
-        <pre className="flex-1 min-h-0 overflow-auto p-3 font-mono text-xs whitespace-pre-wrap break-all">
-          {JSON.stringify(doc, null, 2)}
-        </pre>
+        <div className="relative flex-1 min-h-0">
+          <button
+            type="button"
+            className={`${buttonClass} absolute right-4 top-2 z-10`}
+            style={buttonStyle}
+            aria-label="Copy raw JSON"
+            title="Copy raw JSON"
+            onClick={() => copy('json', JSON.stringify(doc, null, 2))}
+          >
+            {copied === 'json' ? 'Copied' : 'Copy'}
+          </button>
+          <pre className="h-full overflow-auto p-3 font-mono text-xs whitespace-pre-wrap break-all">
+            {highlightJson(doc)}
+          </pre>
+        </div>
       )}
     </aside>
   );
