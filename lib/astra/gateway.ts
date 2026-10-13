@@ -43,6 +43,7 @@ import {
   validateSearch,
 } from '@/lib/query/compile';
 import { type DocId, type QuerySpec, SORT_MAX_DOCUMENTS } from '@/lib/query/types';
+import type { DataApiCallInfo } from '@/lib/trace/types';
 
 // Import SDK types for compatibility
 import type {
@@ -55,6 +56,7 @@ import type {
   RerankServiceOptions as SDKRerankServiceOptions,
   CollectionDefaultIdOptions as SDKDefaultIdOptions,
   SomeDoc,
+  Db,
 } from '@datastax/astra-db-ts';
 
 /** Re-export of SDK CollectionDescriptor with added capabilities */
@@ -126,6 +128,52 @@ async function fetchWithError(url: string, options: RequestInit): Promise<Respon
   return response;
 }
 
+// ─── Data API call recording (for the Live Query Trace) ─────────────────────
+
+/** Copy of a request body that is safe to show: long number arrays (vectors) are shortened. */
+function bodyForDisplay(body: unknown): unknown {
+  return JSON.parse(
+    JSON.stringify(body, (_key, value) =>
+      Array.isArray(value) && value.length > 8 && value.every((n) => typeof n === 'number')
+        ? `[${value.length} numbers]`
+        : value,
+    ),
+  );
+}
+
+function dataApiPath(keyspace: string, collection?: string): string {
+  return `/api/json/v1/${keyspace}${collection ? `/${collection}` : ''}`;
+}
+
+/** Runs one Data API command and, when `calls` is given, records what was sent and how long it took. */
+async function timedCommand(
+  db: Db,
+  calls: DataApiCallInfo[] | undefined,
+  keyspace: string,
+  collection: string | undefined,
+  payload: Record<string, unknown>,
+) {
+  const start = performance.now();
+  let failed = false;
+  try {
+    const response = await db.command(payload, collection ? { collection } : undefined);
+    failed = (response.errors?.length ?? 0) > 0;
+    return response;
+  } catch (err) {
+    failed = true;
+    throw err;
+  } finally {
+    calls?.push({
+      command: Object.keys(payload)[0],
+      method: 'POST',
+      path: dataApiPath(keyspace, collection),
+      body: bodyForDisplay(payload),
+      ms: Math.round(performance.now() - start),
+      ...(failed ? { failed: true } : {}),
+    });
+  }
+}
+
 // ─── Gateway functions ──────────────────────────────────────────────────────
 
 export async function listKeyspaces(): Promise<{ keyspaces: string[] } | { error: string }> {
@@ -153,7 +201,8 @@ export async function listKeyspaces(): Promise<{ keyspaces: string[] } | { error
 }
 
 export async function listCollections(
-  keyspace: string
+  keyspace: string,
+  calls?: DataApiCallInfo[],
 ): Promise<{ collections: CollectionDescriptor[] } | { error: string }> {
   try {
     const { DataAPIClient } = await import('@datastax/astra-db-ts');
@@ -161,7 +210,15 @@ export async function listCollections(
     const db = client.db(ENDPOINT, { keyspace });
 
     // Use listCollections with nameOnly: false to get full options (default)
+    const listStart = performance.now();
     const collections = await db.listCollections();
+    calls?.push({
+      command: 'findCollections',
+      method: 'POST',
+      path: dataApiPath(keyspace),
+      body: { findCollections: { options: { explain: true } } },
+      ms: Math.round(performance.now() - listStart),
+    });
 
     const descriptors: CollectionDescriptor[] = collections.map((col) => {
       const definition = col.definition ?? ({} as SDKCollectionDefinition<SomeDoc>);
@@ -207,12 +264,8 @@ export type QueryResult = {
   hasNextPage: boolean;
   error?: string;
   errorCode?: string;
-  trace?: Array<{
-    node: 'compile' | 'find' | 'errors';
-    t: number;
-    ms?: number;
-    detail?: Record<string, unknown>;
-  }>;
+  /** The Data API calls made for this query; present when `includeTrace` is set. */
+  calls?: DataApiCallInfo[];
 };
 
 export type CountResult = {
@@ -221,6 +274,7 @@ export type CountResult = {
   isOver1000: boolean;
   error?: string;
   errorCode?: string;
+  calls?: DataApiCallInfo[];
 };
 
 export type QueryOptions = {
@@ -269,8 +323,9 @@ async function toApiError(err: unknown, prefix: string): Promise<ApiError> {
 export async function getCollectionCapabilities(
   keyspace: string,
   collection: string,
+  calls?: DataApiCallInfo[],
 ): Promise<CollectionCapabilities | null> {
-  const result = await listCollections(keyspace);
+  const result = await listCollections(keyspace, calls);
   if ('error' in result) return null;
   return result.collections.find((c) => c.name === collection)?.capabilities ?? null;
 }
@@ -284,14 +339,14 @@ async function lookupVector(
   keyspace: string,
   collection: string,
   id: DocId,
+  calls?: DataApiCallInfo[],
 ): Promise<{ vector: number[] } | ApiError> {
   const { DataAPIClient } = await import('@datastax/astra-db-ts');
   const client = new DataAPIClient(TOKEN);
   const db = client.db(ENDPOINT, { keyspace });
-  const response = await db.command(
-    { findOne: { filter: { _id: id }, projection: { $vector: 1 } } },
-    { collection },
-  );
+  const response = await timedCommand(db, calls, keyspace, collection, {
+    findOne: { filter: { _id: id }, projection: { $vector: 1 } },
+  });
   const apiError = mapDataApiErrors(response.errors);
   if (apiError) return apiError;
 
@@ -314,15 +369,18 @@ async function lookupVector(
  * sorts the loaded results locally).
  */
 async function searchQuery(spec: QuerySpec, options: QueryOptions): Promise<QueryResult> {
+  const calls: DataApiCallInfo[] = [];
+  const callsOut = () => (options.includeTrace ? calls : undefined);
   const fail = (e: ApiError): QueryResult => ({
     documents: [],
     nextPageState: null,
     hasNextPage: false,
     ...e,
+    calls: callsOut(),
   });
 
   try {
-    const caps = await getCollectionCapabilities(spec.keyspace, spec.collection);
+    const caps = await getCollectionCapabilities(spec.keyspace, spec.collection, calls);
     if (!caps) {
       return fail({
         error: `Collection "${spec.collection}" was not found in keyspace "${spec.keyspace}".`,
@@ -336,7 +394,7 @@ async function searchQuery(spec: QuerySpec, options: QueryOptions): Promise<Quer
 
     let vector: number[] | null = null;
     if (spec.searchMode === 'semantic' && spec.similarTo !== null) {
-      const found = await lookupVector(spec.keyspace, spec.collection, spec.similarTo);
+      const found = await lookupVector(spec.keyspace, spec.collection, spec.similarTo, calls);
       if ('error' in found) return fail(found);
       vector = found.vector;
     }
@@ -354,10 +412,9 @@ async function searchQuery(spec: QuerySpec, options: QueryOptions): Promise<Quer
     const { DataAPIClient } = await import('@datastax/astra-db-ts');
     const client = new DataAPIClient(TOKEN);
     const db = client.db(ENDPOINT, { keyspace: spec.keyspace });
-    const response = await db.command(
-      { [request.command]: request.body },
-      { collection: spec.collection },
-    );
+    const response = await timedCommand(db, calls, spec.keyspace, spec.collection, {
+      [request.command]: request.body,
+    });
 
     const apiError = mapDataApiErrors(response.errors);
     if (apiError) return fail(apiError);
@@ -368,7 +425,7 @@ async function searchQuery(spec: QuerySpec, options: QueryOptions): Promise<Quer
       const status = response.status as { documentResponses?: unknown } | undefined;
       documents = mergeRerankScores(documents, status?.documentResponses);
     }
-    return { documents, nextPageState: null, hasNextPage: false };
+    return { documents, nextPageState: null, hasNextPage: false, calls: callsOut() };
   } catch (err) {
     return fail(await toApiError(err, 'Failed to search collection'));
   }
@@ -384,34 +441,21 @@ async function searchQuery(spec: QuerySpec, options: QueryOptions): Promise<Quer
  * Filter / search are wired in later phases.
  */
 export async function query(spec: QuerySpec, options: QueryOptions = {}): Promise<QueryResult> {
-  const reqStart = performance.now();
-  const trace: Array<{
-    node: 'compile' | 'find' | 'errors';
-    t: number;
-    ms?: number;
-    detail?: Record<string, unknown>;
-  }> = [];
-
   if (spec.searchMode !== 'browse') return searchQuery(spec, options);
 
+  const calls: DataApiCallInfo[] = [];
+  const callsOut = () => (options.includeTrace ? calls : undefined);
   const sorted = spec.sort.length > 0;
   const skip = spec.pageIndex * spec.pageSize;
 
   if (sorted && skip + spec.pageSize > SORT_MAX_DOCUMENTS) {
-    if (options.includeTrace) {
-      trace.push({
-        node: 'errors',
-        t: Math.round(performance.now() - reqStart),
-        detail: { code: 'SORT_PAGE_BEYOND_LIMIT', limit: SORT_MAX_DOCUMENTS },
-      });
-    }
     return {
       documents: [],
       nextPageState: null,
       hasNextPage: false,
       errorCode: 'SORT_PAGE_BEYOND_LIMIT',
       error: `Sorted results are limited to the first ${SORT_MAX_DOCUMENTS.toLocaleString('en-US')} documents. Go to an earlier page or narrow your filter.`,
-      trace: options.includeTrace ? trace : undefined,
+      calls: callsOut(),
     };
   }
 
@@ -425,62 +469,26 @@ export async function query(spec: QuerySpec, options: QueryOptions = {}): Promis
       : { limit: spec.pageSize, pageState: spec.pageState ?? undefined };
 
     const filterDoc = buildFindFilter(spec, options.fieldTypes);
+    const sortDoc = sorted ? compileSort(spec.sort) : undefined;
 
-    let sortDoc: Record<string, 1 | -1> | undefined;
-    if (sorted) {
-      const compileStart = performance.now();
-      sortDoc = compileSort(spec.sort);
-      const compileMs = Math.round(performance.now() - compileStart);
-      if (options.includeTrace) {
-        trace.push({
-          node: 'compile',
-          t: Math.round(compileStart - reqStart),
-          ms: compileMs,
-          detail: { keys: spec.sort.length },
-        });
-      }
-    }
-
-    const findStart = performance.now();
-    const response = await db.command(
-      {
-        find: {
-          filter: filterDoc,
-          ...(sortDoc ? { sort: sortDoc } : {}),
-          projection: options.projection ?? { $vector: 0 },
-          options: findOptions,
-        },
+    const response = await timedCommand(db, calls, spec.keyspace, spec.collection, {
+      find: {
+        filter: filterDoc,
+        ...(sortDoc ? { sort: sortDoc } : {}),
+        projection: options.projection ?? { $vector: 0 },
+        options: findOptions,
       },
-      { collection: spec.collection },
-    );
-    const findMs = Math.round(performance.now() - findStart);
+    });
 
     const apiError = mapDataApiErrors(response.errors);
     if (apiError) {
-      if (options.includeTrace) {
-        trace.push({
-          node: 'errors',
-          t: Math.round(findStart - reqStart),
-          ms: findMs,
-          detail: { code: apiError.errorCode },
-        });
-      }
       return {
         documents: [],
         nextPageState: null,
         hasNextPage: false,
         ...apiError,
-        trace: options.includeTrace ? trace : undefined,
+        calls: callsOut(),
       };
-    }
-
-    if (options.includeTrace) {
-      trace.push({
-        node: 'find',
-        t: Math.round(findStart - reqStart),
-        ms: findMs,
-        detail: { count: (response.data as { documents?: unknown[] })?.documents?.length ?? 0 },
-      });
     }
 
     const data = response.data as
@@ -492,23 +500,16 @@ export async function query(spec: QuerySpec, options: QueryOptions = {}): Promis
       documents,
       nextPageState,
       hasNextPage: sorted ? documents.length === spec.pageSize : nextPageState !== null,
-      trace: options.includeTrace ? trace : undefined,
+      calls: callsOut(),
     };
   } catch (err) {
     const apiError = await toApiError(err, 'Failed to query collection');
-    if (options.includeTrace) {
-      trace.push({
-        node: 'errors',
-        t: Math.round(performance.now() - reqStart),
-        detail: { code: apiError.errorCode },
-      });
-    }
     return {
       documents: [],
       nextPageState: null,
       hasNextPage: false,
       ...apiError,
-      trace: options.includeTrace ? trace : undefined,
+      calls: callsOut(),
     };
   }
 }
@@ -522,8 +523,10 @@ export async function query(spec: QuerySpec, options: QueryOptions = {}): Promis
  */
 export async function count(
   spec: QuerySpec,
-  options?: { fieldTypes?: Record<string, FieldType> },
+  options?: { fieldTypes?: Record<string, FieldType>; includeTrace?: boolean },
 ): Promise<CountResult> {
+  const calls: DataApiCallInfo[] = [];
+  const callsOut = () => (options?.includeTrace ? calls : undefined);
   // Search modes never call countDocuments: the count is the number of returned results.
   if (spec.searchMode !== 'browse') {
     const result = await query(spec, options);
@@ -534,9 +537,10 @@ export async function count(
         isOver1000: false,
         error: result.error,
         errorCode: result.errorCode,
+        calls: result.calls,
       };
     }
-    return { count: result.documents.length, isEstimate: false, isOver1000: false };
+    return { count: result.documents.length, isEstimate: false, isOver1000: false, calls: result.calls };
   }
 
   try {
@@ -547,20 +551,23 @@ export async function count(
     const hasFilter = spec.filter && spec.filter.children.length > 0;
     if (hasFilter) {
       const filterDoc = buildFindFilter(spec, options?.fieldTypes);
-      const response = await db.command(
-        {
-          // No `options`: this Data API rejects any options on countDocuments.
-          // The count is capped server-side at 1000; `moreData` signals "1,000+".
-          countDocuments: {
-            filter: filterDoc,
-          },
+      const response = await timedCommand(db, calls, spec.keyspace, spec.collection, {
+        // No `options`: this Data API rejects any options on countDocuments.
+        // The count is capped server-side at 1000; `moreData` signals "1,000+".
+        countDocuments: {
+          filter: filterDoc,
         },
-        { collection: spec.collection },
-      );
+      });
 
       const apiError = mapDataApiErrors(response.errors);
       if (apiError) {
-        return { count: 0, isEstimate: false, isOver1000: false, error: apiError.error };
+        return {
+          count: 0,
+          isEstimate: false,
+          isOver1000: false,
+          error: apiError.error,
+          calls: callsOut(),
+        };
       }
 
       const status = response.status as { count?: number; moreData?: boolean } | undefined;
@@ -568,11 +575,20 @@ export async function count(
         count: status?.count ?? 0,
         isEstimate: false,
         isOver1000: status?.moreData ?? false,
+        calls: callsOut(),
       };
     }
 
+    const estimateStart = performance.now();
     const n = await db.collection(spec.collection).estimatedDocumentCount();
-    return { count: n, isEstimate: true, isOver1000: false };
+    calls.push({
+      command: 'estimatedDocumentCount',
+      method: 'POST',
+      path: dataApiPath(spec.keyspace, spec.collection),
+      body: { estimatedDocumentCount: {} },
+      ms: Math.round(performance.now() - estimateStart),
+    });
+    return { count: n, isEstimate: true, isOver1000: false, calls: callsOut() };
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     return {
@@ -580,6 +596,7 @@ export async function count(
       isEstimate: false,
       isOver1000: false,
       error: `Failed to count documents: ${message}`,
+      calls: callsOut(),
     };
   }
 }

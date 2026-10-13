@@ -40,10 +40,16 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     }
   }
 
-  const result = await count(spec, { fieldTypes });
+  const includeTrace = params.get('trace') === '1';
+
+  const result = await count(spec, { fieldTypes, includeTrace });
   if (result.error) {
     return NextResponse.json(
-      { error: result.error, ...(result.errorCode ? { errorCode: result.errorCode } : {}) },
+      {
+        error: result.error,
+        ...(result.errorCode ? { errorCode: result.errorCode } : {}),
+        ...(result.calls ? { calls: result.calls } : {}),
+      },
       { status: statusForErrorCode(result.errorCode) },
     );
   }
@@ -51,5 +57,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     count: result.count,
     isEstimate: result.isEstimate,
     isOver1000: result.isOver1000,
+    ...(result.calls ? { calls: result.calls } : {}),
   });
 }

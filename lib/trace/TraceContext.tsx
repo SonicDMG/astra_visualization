@@ -9,13 +9,21 @@ import React, {
   useState,
 } from 'react';
 import type {
-  SortingEdgeId,
-  SortingNodeId,
+  StepWhere,
   SortFieldSpec,
+  TraceHandling,
   TraceRun,
+  TraceRunSource,
   TraceStatus,
   TraceStep,
+  DataApiCallInfo,
 } from './types';
+
+export interface TraceVerdictInput {
+  handling: TraceHandling;
+  reason: string;
+  paging?: string;
+}
 
 interface TraceContextValue {
   isPanelOpen: boolean;
@@ -23,26 +31,34 @@ interface TraceContextValue {
   togglePanel: () => void;
   currentRun: TraceRun | null;
   history: TraceRun[];
-  startRun: (meta: { sortSpec: SortFieldSpec[]; searchMode: string }) => string;
+  startRun: (meta: {
+    sortSpec: SortFieldSpec[];
+    searchMode: string;
+    trigger: string;
+    source: TraceRunSource;
+  }) => string;
+  /** Source of the run between startRun and finishRun, else null; lets later code continue it. */
+  openRunSource: () => TraceRunSource | null;
+  /** Says where the open run is handled (local / Astra memory / live Astra); may be called early. */
+  setVerdict: (verdict: TraceVerdictInput) => void;
   emitStep: (step: {
-    nodeId: SortingNodeId;
-    edgeId?: SortingEdgeId;
+    where: StepWhere;
     status: TraceStatus;
-    label?: string;
+    label: string;
     detail?: string;
-    elapsedMs?: number;
+    endpoint?: string;
+    call?: DataApiCallInfo;
+    /** How long this step itself took. */
+    durationMs?: number;
   }) => void;
   finishRun: (outcome: 'ok' | 'blocked' | 'error', errorDetail?: string) => void;
   replayRun: (runId?: string) => void;
   clearHistory: () => void;
-  selectedNodeId: SortingNodeId | null;
-  setSelectedNodeId: (nodeId: SortingNodeId | null) => void;
 }
 
 const TraceContext = createContext<TraceContextValue | null>(null);
 
 const MAX_HISTORY = 15;
-const FADE_DELAY_MS = 3000;
 
 export function TraceProvider({ children }: { children: React.ReactNode }) {
   // Starts closed on server and client alike; the saved preference is applied after mount so
@@ -61,7 +77,6 @@ export function TraceProvider({ children }: { children: React.ReactNode }) {
   }, []);
   const [currentRun, setCurrentRun] = useState<TraceRun | null>(null);
   const [history, setHistory] = useState<TraceRun[]>([]);
-  const [selectedNodeId, setSelectedNodeId] = useState<SortingNodeId | null>(null);
 
   const setPanelOpen = useCallback((open: boolean | ((prev: boolean) => boolean)) => {
     setPanelOpenState((prev) => {
@@ -76,7 +91,7 @@ export function TraceProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const runStartTimeRef = useRef<number>(0);
-  const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const runSourceRef = useRef<TraceRunSource | null>(null);
   const replayTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const togglePanel = useCallback(() => {
@@ -90,35 +105,35 @@ export function TraceProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     return () => {
-      if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current);
       clearReplayTimers();
     };
   }, [clearReplayTimers]);
 
   const startRun = useCallback(
-    (meta: { sortSpec: SortFieldSpec[]; searchMode: string }): string => {
-      // If panel is closed, tracing can still record into history or act as lightweight tracker
+    (meta: {
+      sortSpec: SortFieldSpec[];
+      searchMode: string;
+      trigger: string;
+      source: TraceRunSource;
+    }): string => {
       clearReplayTimers();
-      if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current);
 
-      const now = performance.now();
-      runStartTimeRef.current = now;
+      runStartTimeRef.current = performance.now();
+      runSourceRef.current = meta.source;
       const runId = `trace-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
       const newRun: TraceRun = {
         id: runId,
         timestamp: Date.now(),
+        trigger: meta.trigger,
+        handling: 'astra-live',
+        reason: '',
         sortSpec: meta.sortSpec,
         searchMode: meta.searchMode,
         outcome: 'ok',
         totalMs: 0,
         steps: [],
-        nodeTimings: {},
-        activeNodeId: null,
-        activeEdgeId: null,
-        completedNodeIds: new Set<SortingNodeId>(),
-        completedEdgeIds: new Set<SortingEdgeId>(),
-        nodeStatuses: {},
+        activeStepIndex: null,
       };
 
       setCurrentRun(newRun);
@@ -127,159 +142,103 @@ export function TraceProvider({ children }: { children: React.ReactNode }) {
     [clearReplayTimers],
   );
 
+  const openRunSource = useCallback(() => runSourceRef.current, []);
+
+  const setVerdict = useCallback((verdict: TraceVerdictInput) => {
+    if (runSourceRef.current === null) return;
+    setCurrentRun((prev) =>
+      prev
+        ? { ...prev, handling: verdict.handling, reason: verdict.reason, paging: verdict.paging }
+        : null,
+    );
+  }, []);
+
   const emitStep = useCallback(
     (step: {
-      nodeId: SortingNodeId;
-      edgeId?: SortingEdgeId;
+      where: StepWhere;
       status: TraceStatus;
-      label?: string;
+      label: string;
       detail?: string;
-      elapsedMs?: number;
+      endpoint?: string;
+      call?: DataApiCallInfo;
+      durationMs?: number;
     }) => {
-      const now = performance.now();
+      // Steps after a run finished (e.g. a refetch of the same request) must not rewrite it.
+      if (runSourceRef.current === null) return;
       const elapsed =
-        step.elapsedMs ?? (runStartTimeRef.current > 0 ? Math.round(now - runStartTimeRef.current) : 0);
+        runStartTimeRef.current > 0 ? Math.round(performance.now() - runStartTimeRef.current) : 0;
 
       setCurrentRun((prev) => {
         if (!prev) return null;
-
-        const nextCompletedNodes = new Set(prev.completedNodeIds);
-        const nextCompletedEdges = new Set(prev.completedEdgeIds);
-        const nextNodeStatuses = { ...prev.nodeStatuses };
-        const nextTimings = { ...prev.nodeTimings };
-
-        nextCompletedNodes.add(step.nodeId);
-        if (step.edgeId) {
-          nextCompletedEdges.add(step.edgeId);
-        }
-        nextNodeStatuses[step.nodeId] = step.status;
-        nextTimings[step.nodeId] = elapsed;
-
+        // A step still "active" is a placeholder for work in flight; the real step replaces it.
+        const last = prev.steps[prev.steps.length - 1];
+        const base = last?.status === 'active' ? prev.steps.slice(0, -1) : prev.steps;
         const traceStep: TraceStep = {
-          nodeId: step.nodeId,
-          edgeId: step.edgeId,
+          where: step.where,
           status: step.status,
           timestamp: Date.now(),
           elapsedMs: elapsed,
+          durationMs: step.durationMs,
           label: step.label,
           detail: step.detail,
+          endpoint: step.endpoint,
+          call: step.call,
         };
-
+        const steps = [...base, traceStep];
         return {
           ...prev,
           totalMs: elapsed,
-          activeNodeId: step.nodeId,
-          activeEdgeId: step.edgeId ?? null,
-          completedNodeIds: nextCompletedNodes,
-          completedEdgeIds: nextCompletedEdges,
-          nodeStatuses: nextNodeStatuses,
-          nodeTimings: nextTimings,
-          steps: [...prev.steps, traceStep],
+          steps,
+          activeStepIndex: step.status === 'active' ? steps.length - 1 : null,
         };
       });
     },
     [],
   );
 
-  const finishRun = useCallback(
-    (outcome: 'ok' | 'blocked' | 'error', errorDetail?: string) => {
-      const now = performance.now();
-      const total = runStartTimeRef.current > 0 ? Math.round(now - runStartTimeRef.current) : 0;
+  const finishRun = useCallback((outcome: 'ok' | 'blocked' | 'error', errorDetail?: string) => {
+    if (runSourceRef.current === null) return;
+    runSourceRef.current = null;
+    const total =
+      runStartTimeRef.current > 0 ? Math.round(performance.now() - runStartTimeRef.current) : 0;
 
-      setCurrentRun((prev) => {
-        if (!prev) return null;
-        const finalized: TraceRun = {
-          ...prev,
-          outcome,
-          totalMs: total,
-          errorDetail,
-          activeNodeId: null,
-          activeEdgeId: null,
-        };
+    setCurrentRun((prev) => {
+      if (!prev) return null;
+      const finalized: TraceRun = {
+        ...prev,
+        outcome,
+        totalMs: total,
+        errorDetail,
+        activeStepIndex: null,
+      };
 
-        setHistory((hist) => [finalized, ...hist.filter((h) => h.id !== finalized.id)].slice(0, MAX_HISTORY));
-
-        // Start fade timer to un-highlight active tracks after 3s
-        if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current);
-        fadeTimerRef.current = setTimeout(() => {
-          setCurrentRun((curr) => {
-            if (!curr || curr.id !== finalized.id) return curr;
-            return {
-              ...curr,
-              activeNodeId: null,
-              activeEdgeId: null,
-            };
-          });
-        }, FADE_DELAY_MS);
-
-        return finalized;
-      });
-    },
-    [],
-  );
+      setHistory((hist) => [finalized, ...hist.filter((h) => h.id !== finalized.id)].slice(0, MAX_HISTORY));
+      return finalized;
+    });
+  }, []);
 
   const replayRun = useCallback(
     (runId?: string) => {
       clearReplayTimers();
-      if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current);
 
       const target = runId ? history.find((h) => h.id === runId) : currentRun || history[0];
       if (!target || target.steps.length === 0) return;
 
-      // Reset run view
-      const resetRun: TraceRun = {
-        ...target,
-        activeNodeId: null,
-        activeEdgeId: null,
-        completedNodeIds: new Set<SortingNodeId>(),
-        completedEdgeIds: new Set<SortingEdgeId>(),
-        nodeStatuses: {},
-        nodeTimings: {},
-      };
-      setCurrentRun(resetRun);
+      setCurrentRun({ ...target, steps: [], activeStepIndex: null });
 
-      const baseDelay = 260; // ms per step
-      target.steps.forEach((step, index) => {
+      const baseDelay = 320; // ms per step
+      target.steps.forEach((_step, index) => {
         const timer = setTimeout(() => {
-          setCurrentRun((prev) => {
-            if (!prev) return null;
-            const nextCompletedNodes = new Set(prev.completedNodeIds);
-            const nextCompletedEdges = new Set(prev.completedEdgeIds);
-            const nextNodeStatuses = { ...prev.nodeStatuses };
-            const nextTimings = { ...prev.nodeTimings };
-
-            nextCompletedNodes.add(step.nodeId);
-            if (step.edgeId) nextCompletedEdges.add(step.edgeId);
-            nextNodeStatuses[step.nodeId] = step.status;
-            if (step.elapsedMs !== undefined) nextTimings[step.nodeId] = step.elapsedMs;
-
-            return {
-              ...prev,
-              activeNodeId: step.nodeId,
-              activeEdgeId: step.edgeId ?? null,
-              completedNodeIds: nextCompletedNodes,
-              completedEdgeIds: nextCompletedEdges,
-              nodeStatuses: nextNodeStatuses,
-              nodeTimings: nextTimings,
-            };
-          });
-
-          // Final step cleanup
-          if (index === target.steps.length - 1) {
-            const endTimer = setTimeout(() => {
-              setCurrentRun((prev) => {
-                if (!prev) return null;
-                return {
+          setCurrentRun((prev) =>
+            prev
+              ? {
                   ...prev,
-                  activeNodeId: null,
-                  activeEdgeId: null,
-                };
-              });
-            }, FADE_DELAY_MS);
-            replayTimersRef.current.push(endTimer);
-          }
+                  steps: target.steps.slice(0, index + 1),
+                  activeStepIndex: index === target.steps.length - 1 ? null : index,
+                }
+              : null,
+          );
         }, index * baseDelay);
-
         replayTimersRef.current.push(timer);
       });
     },
@@ -299,12 +258,12 @@ export function TraceProvider({ children }: { children: React.ReactNode }) {
         currentRun,
         history,
         startRun,
+        openRunSource,
+        setVerdict,
         emitStep,
         finishRun,
         replayRun,
         clearHistory,
-        selectedNodeId,
-        setSelectedNodeId,
       }}
     >
       {children}

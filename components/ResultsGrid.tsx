@@ -774,54 +774,57 @@ export default function ResultsGrid({
       })),
   });
 
-  const { isPanelOpen, startRun, emitStep, finishRun } = useTrace();
+  const { isPanelOpen, startRun, setVerdict, emitStep, finishRun } = useTrace();
 
   const handleHeaderSort = (
     columnId: string,
     additive: boolean,
     blockedReason: string | null,
   ) => {
-    if (isPanelOpen) {
-      startRun({
-        sortSpec: sort.map((k) => ({ field: k.field, dir: k.dir })),
-        searchMode: searchMode ?? 'browse',
-      });
-      emitStep({
-        nodeId: 'click',
-        status: 'ok',
-        label: `Header click: "${columnId}"`,
-        detail: additive ? 'Shift-click (multi-column)' : 'Single column sort',
-      });
-      emitStep({
-        nodeId: 'gate',
-        edgeId: 'click-gate',
-        status: blockedReason ? 'blocked' : 'ok',
-        label: blockedReason ? 'Sortable check: BLOCKED' : 'Sortable check: ALLOWED',
-        detail: blockedReason ? blockedReason : 'Indexed scalar field',
-      });
-      if (blockedReason !== null) {
+    if (blockedReason !== null) {
+      if (isPanelOpen) {
+        startRun({
+          sortSpec: sort.map((k) => ({ field: k.field, dir: k.dir })),
+          searchMode: searchMode ?? 'browse',
+          trigger: `Clicked "${displayPath(columnId)}" header`,
+          source: 'header-click',
+        });
+        setVerdict({
+          handling: 'blocked',
+          reason: `This column cannot be sorted, so nothing was sent anywhere. ${blockedReason}`,
+        });
         emitStep({
-          nodeId: 'noop',
-          edgeId: 'gate-noop',
+          where: 'browser',
+          status: 'ok',
+          label: `Clicked the "${displayPath(columnId)}" header`,
+        });
+        emitStep({
+          where: 'browser',
           status: 'blocked',
-          label: 'Blocked: no-op',
-          detail: blockedReason,
+          label: 'Sort refused',
+          detail: `${blockedReason}. Nothing was sent.`,
         });
         finishRun('blocked', blockedReason);
-        return;
       }
+      return;
     }
-
-    if (blockedReason !== null) return;
 
     const nextSort = cycleSort(sort, columnId, additive);
     if (isPanelOpen) {
+      const nextSummary =
+        nextSort.map((s) => `${displayPath(s.field)} ${s.dir === 'asc' ? 'ascending' : 'descending'}`).join(', ') ||
+        'no sort (original order)';
+      startRun({
+        sortSpec: nextSort.map((k) => ({ field: k.field, dir: k.dir })),
+        searchMode: searchMode ?? 'browse',
+        trigger: `Clicked "${displayPath(columnId)}" header`,
+        source: 'header-click',
+      });
       emitStep({
-        nodeId: 'change',
-        edgeId: 'gate-change',
+        where: 'browser',
         status: 'ok',
-        label: `cycleSort (${nextSort.length} key${nextSort.length === 1 ? '' : 's'})`,
-        detail: nextSort.map((s) => `${s.field} ${s.dir}`).join(', ') || 'off',
+        label: `Clicked "${displayPath(columnId)}": sort by ${nextSummary}`,
+        detail: additive ? 'Shift-click adds to the sort' : undefined,
       });
     }
     onSortChange(nextSort);

@@ -9,7 +9,15 @@ import LiveTracePanel from '@/components/LiveTracePanel';
 import SearchBar, { type SearchPatch } from '@/components/SearchBar';
 import type { CollectionCapabilities } from '@/lib/astra/gateway';
 import { useTrace } from '@/lib/trace/TraceContext';
-import type { ServerTraceEvent } from '@/lib/trace/types';
+import {
+  appRequestLabel,
+  callSummary,
+  classifyQuery,
+  describeCall,
+  describeTrigger,
+  localSortVerdict,
+} from '@/lib/trace/describe';
+import type { DataApiCallInfo } from '@/lib/trace/types';
 import { deriveFields, docKey, unwrapScalar } from '@/lib/astra/schema';
 import { displayPath, sortDocumentsLocally } from '@/lib/query/compile';
 import { loadLayout } from '@/lib/ui/columnLayout';
@@ -33,6 +41,7 @@ interface CountInfo {
   count: number;
   isEstimate: boolean;
   isOver1000: boolean;
+  calls?: DataApiCallInfo[];
 }
 
 interface ExplorerStateProps {
@@ -50,10 +59,13 @@ const SORT_ERROR_CODES: ReadonlySet<string> = new Set([
 
 class ApiRequestError extends Error {
   readonly errorCode: string | null;
-  constructor(message: string, errorCode: string | null) {
+  /** Data API calls made before the failure (only when tracing). */
+  readonly calls: DataApiCallInfo[];
+  constructor(message: string, errorCode: string | null, calls: DataApiCallInfo[] = []) {
     super(message);
     this.name = 'ApiRequestError';
     this.errorCode = errorCode;
+    this.calls = calls;
   }
 }
 
@@ -95,8 +107,16 @@ async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
   const data = (await res.json()) as T | { error: string; errorCode?: string };
   if (typeof data === 'object' && data !== null && 'error' in data) {
-    const { error, errorCode } = data as { error: unknown; errorCode?: unknown };
-    throw new ApiRequestError(String(error), typeof errorCode === 'string' ? errorCode : null);
+    const { error, errorCode, calls } = data as {
+      error: unknown;
+      errorCode?: unknown;
+      calls?: DataApiCallInfo[];
+    };
+    throw new ApiRequestError(
+      String(error),
+      typeof errorCode === 'string' ? errorCode : null,
+      Array.isArray(calls) ? calls : [],
+    );
   }
   return data as T;
 }
@@ -122,10 +142,14 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   // pageIndex -> pageState used to load that page, so Previous can step back.
   const pageStateHistory = useRef<Map<number, string | null>>(new Map());
-  const { isPanelOpen, startRun, emitStep, finishRun } = useTrace();
-  // Identifies the sort/page/refresh a trace run was started for, so refetches caused by anything
-  // else (e.g. field types arriving) continue that run instead of starting another.
+  const { isPanelOpen, startRun, openRunSource, setVerdict, emitStep, finishRun } = useTrace();
+  // Identifies the query (filter, search, sort, page, refresh) a trace run was started for, so
+  // refetches caused by anything else (e.g. field types arriving) continue that run.
   const lastTracedRunKeyRef = useRef<string | null>(null);
+  const lastRefreshTokenRef = useRef(0);
+  // Latest spec for tracing, so a local sort (which changes `spec` but not the request) cannot
+  // re-run the fetch effect.
+  const specRef = useRef<QuerySpec | null>(null);
 
   const paramsString = searchParams.toString();
   const spec: QuerySpec = useMemo(
@@ -168,6 +192,10 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     };
   }, [keyspace, collection]);
 
+  useEffect(() => {
+    specRef.current = spec;
+  }, [spec]);
+
   const hasFilter = spec.filter.children.length > 0;
   const fieldTypesParam = useMemo(() => {
     // Field types only matter for filters. Skipping them otherwise avoids the refetch they
@@ -184,27 +212,53 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     setLoading(true);
     const traceQueryParam = isPanelOpen ? '&trace=1' : '';
 
-    const runKey = `${JSON.stringify(spec.sort)}|${spec.pageIndex}|${refreshToken}`;
-    if (isPanelOpen && !isSearch && spec.sort.length > 0 && lastTracedRunKeyRef.current !== runKey) {
+    const spec = specRef.current;
+    if (!spec) return;
+    const queryUrl = `${specQuery}${showVector ? '&sv=1' : ''}${fieldTypesParam}`;
+    const queryPath = `/api/query?${queryUrl}${traceQueryParam}`;
+    const runKey = `${specQuery}|${refreshToken}`;
+    if (isPanelOpen && lastTracedRunKeyRef.current !== runKey) {
       lastTracedRunKeyRef.current = runKey;
-      startRun({
-        sortSpec: spec.sort.map((k) => ({ field: k.field, dir: k.dir })),
-        searchMode: 'browse',
-      });
-      emitStep({
-        nodeId: 'change',
-        status: 'ok',
-        label: spec.pageIndex > 0 ? `Page navigation (p=${spec.pageIndex + 1})` : 'Sorted query',
-        detail: spec.sort.map((s) => `${s.field} ${s.dir}`).join(', '),
-      });
+      const isRefresh = refreshToken !== lastRefreshTokenRef.current;
+      lastRefreshTokenRef.current = refreshToken;
+      // A header click already started its run (and its first step) in ResultsGrid.
+      if (openRunSource() !== 'header-click') {
+        startRun({
+          sortSpec: spec.sort.map((k) => ({ field: k.field, dir: k.dir })),
+          searchMode: spec.searchMode,
+          trigger: describeTrigger(spec, isRefresh ? 'refresh' : 'query'),
+          source: 'query',
+        });
+        emitStep({
+          where: 'browser',
+          status: 'ok',
+          label: describeTrigger(spec, isRefresh ? 'refresh' : 'query'),
+          detail: isRefresh ? 'You refreshed the results' : 'You changed the query',
+        });
+      }
+      setVerdict(classifyQuery(spec));
     }
+    // Shown (and glowing) while the request is in flight; replaced by the real steps below.
+    emitStep({
+      where: 'server',
+      status: 'active',
+      label: 'Create Data API request',
+      endpoint: appRequestLabel('/api/query', queryUrl),
+      detail: 'Waiting for Astra…',
+    });
 
+    const requestStart = performance.now();
+    let queryMs = 0;
+    let countMs = 0;
     const queryRequest = fetchJson<{
       documents: Doc[];
       nextPageState: string | null;
       hasNextPage: boolean;
-      trace?: ServerTraceEvent[];
-    }>(`/api/query?${specQuery}${showVector ? '&sv=1' : ''}${fieldTypesParam}${traceQueryParam}`);
+      calls?: DataApiCallInfo[];
+    }>(queryPath).then((q) => {
+      queryMs = Math.round(performance.now() - requestStart);
+      return q;
+    });
     // Search modes never count: the count is the number of returned results.
     const countRequest: Promise<CountInfo> = isSearch
       ? queryRequest.then((q) => ({
@@ -212,7 +266,28 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
           isEstimate: false,
           isOver1000: false,
         }))
-      : fetchJson<CountInfo>(`/api/count?${specQuery}${fieldTypesParam}`);
+      : fetchJson<CountInfo>(`/api/count?${specQuery}${fieldTypesParam}${traceQueryParam}`).then((c) => {
+          countMs = Math.round(performance.now() - requestStart);
+          return c;
+        });
+
+    /** One box per Data API call, with its endpoint and a one-line summary of what was sent. */
+    const emitCalls = (calls: DataApiCallInfo[] | undefined, failedStatus: 'ok' | 'error') => {
+      (calls ?? []).forEach((call) => {
+        emitStep({
+          where: 'astra',
+          status: call.failed ? failedStatus : 'ok',
+          label: describeCall(call).title,
+          endpoint: `${call.method} ${call.path}`,
+          detail: callSummary(call),
+          durationMs: call.ms,
+          call,
+        });
+      });
+    };
+    const sumMs = (calls: DataApiCallInfo[] | undefined) =>
+      (calls ?? []).reduce((total, call) => total + call.ms, 0);
+
     Promise.all([queryRequest, countRequest])
       .then(([q, c]) => {
         if (cancelled) return;
@@ -222,60 +297,32 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
         setCountInfo(c);
         setError(null);
 
-        if (isPanelOpen && !isSearch && spec.sort.length > 0) {
+        if (isPanelOpen) {
+          const rows = q.documents.length;
+          const rowText = `${rows.toLocaleString('en-US')} ${rows === 1 ? 'row' : 'rows'}`;
           emitStep({
-            nodeId: 'mode',
-            edgeId: 'change-mode',
+            where: 'server',
             status: 'ok',
-            label: 'Browse mode',
+            label: 'Create Data API request',
+            endpoint: appRequestLabel('/api/query', queryUrl),
+            detail: 'Turns the sort, filter and paging into a Data API command',
+            durationMs: Math.max(queryMs - sumMs(q.calls), 0),
           });
-
-          if (q.trace && q.trace.length > 0) {
-            const compileEvt = q.trace.find((t) => t.node === 'compile');
-            if (compileEvt) {
+          emitCalls(q.calls, 'error');
+          if (!isSearch) {
+            if (c.calls?.length) {
+              emitCalls(c.calls, 'error');
+            } else {
               emitStep({
-                nodeId: 'compile',
-                edgeId: 'mode-compile',
+                where: 'astra',
                 status: 'ok',
-                label: 'compileSort (Server)',
-                detail: `Keys: ${spec.sort.length}`,
-                elapsedMs: compileEvt.ms,
+                label: 'Count the matching documents',
+                detail: formatCount(c),
+                durationMs: countMs,
               });
             }
-            const findEvt = q.trace.find((t) => t.node === 'find');
-            if (findEvt) {
-              emitStep({
-                nodeId: 'find',
-                edgeId: 'compile-find',
-                status: 'ok',
-                label: 'Astra find (Server)',
-                detail: `Returned ${q.documents.length} docs`,
-                elapsedMs: findEvt.ms,
-              });
-            }
-          } else {
-            emitStep({
-              nodeId: 'compile',
-              edgeId: 'mode-compile',
-              status: 'ok',
-              label: 'compileSort (Server)',
-            });
-            emitStep({
-              nodeId: 'find',
-              edgeId: 'compile-find',
-              status: 'ok',
-              label: 'Astra find (Server)',
-              detail: `Returned ${q.documents.length} docs`,
-            });
           }
-
-          emitStep({
-            nodeId: 'render',
-            edgeId: 'find-render',
-            status: 'ok',
-            label: 'Grid renders page',
-            detail: `${q.documents.length} rows rendered`,
-          });
+          emitStep({ where: 'browser', status: 'ok', label: `Grid shows ${rowText}` });
           finishRun('ok');
         }
       })
@@ -288,32 +335,38 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
           code: errCode,
         });
 
-        if (isPanelOpen && !isSearch && spec.sort.length > 0) {
-          emitStep({
-            nodeId: 'mode',
-            edgeId: 'change-mode',
-            status: 'ok',
-            label: 'Browse mode',
-          });
-          emitStep({
-            nodeId: 'compile',
-            edgeId: 'mode-compile',
-            status: 'ok',
-            label: 'compileSort (Server)',
-          });
-          emitStep({
-            nodeId: 'find',
-            edgeId: 'compile-find',
-            status: 'ok',
-            label: 'Astra find (Server)',
-          });
-          emitStep({
-            nodeId: 'errors',
-            edgeId: 'find-errors',
-            status: 'error',
-            label: 'Error banner',
-            detail: errCode ?? errMsg,
-          });
+        if (isPanelOpen) {
+          const calls = err instanceof ApiRequestError ? err.calls : [];
+          if (errCode === 'SORT_PAGE_BEYOND_LIMIT') {
+            emitStep({
+              where: 'server',
+              status: 'error',
+              label: 'Request refused',
+              endpoint: appRequestLabel('/api/query', queryUrl),
+              detail: 'This page is past the first 10,000 sorted documents, so no Data API call was made.',
+            });
+          } else {
+            emitStep({
+              where: 'server',
+              status: 'ok',
+              label: 'Create Data API request',
+              endpoint: appRequestLabel('/api/query', queryUrl),
+              durationMs: Math.max(
+                Math.round(performance.now() - requestStart) - sumMs(calls),
+                0,
+              ),
+            });
+            if (calls.length > 0) {
+              emitCalls(calls, 'error');
+            } else {
+              emitStep({
+                where: 'astra',
+                status: 'error',
+                label: 'The request failed',
+                detail: errMsg,
+              });
+            }
+          }
           finishRun('error', errCode ?? errMsg);
         }
       })
@@ -330,9 +383,9 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     showVector,
     fieldTypesParam,
     isPanelOpen,
-    spec.sort,
-    spec.pageIndex,
     startRun,
+    openRunSource,
+    setVerdict,
     emitStep,
     finishRun,
   ]);
@@ -419,34 +472,65 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     return sortDocumentsLocally(documents, spec.sort);
   }, [documents, isSearch, error, spec.sort]);
 
-  const lastLocalSortRef = useRef<string>('');
+  // Search results are sorted in the browser: no request, so this is where that run is traced.
+  const lastLocalSortRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!isSearch || !isPanelOpen || spec.sort.length === 0 || error) return;
+    if (!isSearch) {
+      lastLocalSortRef.current = null;
+      return;
+    }
     const sortKey = JSON.stringify(spec.sort);
+    if (lastLocalSortRef.current === null) {
+      // First sight of this search: the fetch effect traces it.
+      lastLocalSortRef.current = sortKey;
+      return;
+    }
     if (lastLocalSortRef.current === sortKey) return;
     lastLocalSortRef.current = sortKey;
+    if (!isPanelOpen || error) return;
 
+    const sortSummary = spec.sort.map((k) => `${displayPath(k.field)} ${k.dir}`).join(', ');
+    if (openRunSource() !== 'header-click') {
+      startRun({
+        sortSpec: spec.sort.map((k) => ({ field: k.field, dir: k.dir })),
+        searchMode: spec.searchMode,
+        trigger: spec.sort.length > 0 ? `Sorted search results by ${sortSummary}` : 'Restored relevance order',
+        source: 'query',
+      });
+      emitStep({
+        where: 'browser',
+        status: 'ok',
+        label: spec.sort.length > 0 ? `Sort search results by ${sortSummary}` : 'Restore relevance order',
+      });
+    }
+    setVerdict(localSortVerdict(documents.length));
+    const sortStart = performance.now();
+    sortDocumentsLocally(documents, spec.sort);
     emitStep({
-      nodeId: 'mode',
-      edgeId: 'change-mode',
+      where: 'browser',
       status: 'ok',
-      label: 'Ranked search mode',
+      label:
+        spec.sort.length > 0
+          ? `Re-sort ${documents.length.toLocaleString('en-US')} loaded rows`
+          : 'Restore relevance order',
+      detail: 'Done in the browser. No request is sent to the app server or Astra.',
+      durationMs: Math.round(performance.now() - sortStart),
     });
-    emitStep({
-      nodeId: 'local',
-      edgeId: 'mode-local',
-      status: 'ok',
-      label: `Local sort (${documents.length} docs)`,
-      detail: 'In-memory client sort (no refetch)',
-    });
-    emitStep({
-      nodeId: 'render',
-      edgeId: 'local-render',
-      status: 'ok',
-      label: 'Grid renders page',
-    });
+    emitStep({ where: 'browser', status: 'ok', label: 'Grid shows the re-sorted rows' });
     finishRun('ok');
-  }, [isSearch, isPanelOpen, spec.sort, error, documents.length, emitStep, finishRun]);
+  }, [
+    isSearch,
+    isPanelOpen,
+    spec.sort,
+    spec.searchMode,
+    error,
+    documents,
+    openRunSource,
+    startRun,
+    setVerdict,
+    emitStep,
+    finishRun,
+  ]);
   const canFindSimilar = capabilities?.hasVector === true;
   const searchBarKey = [
     spec.searchMode,

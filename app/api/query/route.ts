@@ -56,7 +56,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       {
         error: result.error,
         ...(result.errorCode ? { errorCode: result.errorCode } : {}),
-        ...(result.trace ? { trace: result.trace } : {}),
+        ...(result.calls ? { calls: result.calls } : {}),
       },
       { status: statusForErrorCode(result.errorCode) },
     );
@@ -65,6 +65,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     documents: result.documents,
     nextPageState: result.nextPageState,
     hasNextPage: result.hasNextPage,
-    ...(result.trace ? { trace: result.trace } : {}),
+    ...(result.calls ? { calls: result.calls } : {}),
   });
 }
