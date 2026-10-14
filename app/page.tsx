@@ -14,7 +14,7 @@ function HeaderTraceToggle() {
     <button
       type="button"
       onClick={togglePanel}
-      className={`ml-auto mr-3 flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition ${
+      className={`ml-3 flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition ${
         isPanelOpen
           ? 'bg-sky-500/10 text-sky-400 border-sky-500/40 shadow-sm'
           : 'hover:bg-slate-800/40'
