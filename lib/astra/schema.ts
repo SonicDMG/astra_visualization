@@ -248,7 +248,7 @@ export function deriveFields(documents: Record<string, unknown>[]): FieldInfo[] 
  * Checks whether a given field path can be edited.
  * In Astra DB Data API:
  * - `_id` is an immutable primary key that cannot be modified after document creation.
- * - `$similarity` is a synthetic query-time score and cannot be persisted.
+ * - `$similarity` and other `$`-prefixed fields are synthetic query-time values and cannot be persisted.
  */
 export function isFieldEditable(escapedPath: string): { editable: boolean; reason?: string } {
   if (escapedPath === '_id' || escapedPath.startsWith('_id.') || escapedPath.startsWith('_id/')) {
@@ -257,10 +257,11 @@ export function isFieldEditable(escapedPath: string): { editable: boolean; reaso
       reason: 'The _id field is an immutable primary key in Astra DB and cannot be edited.',
     };
   }
-  if (escapedPath === '$similarity') {
+  const topLevelKey = escapedPath.split('.')[0].split('/')[0];
+  if (topLevelKey.startsWith('$')) {
     return {
       editable: false,
-      reason: 'Synthetic similarity score computed dynamically; not a stored document field.',
+      reason: `$-prefixed fields are synthetic values computed by Astra DB and cannot be edited.`,
     };
   }
   return { editable: true };
