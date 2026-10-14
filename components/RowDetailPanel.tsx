@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { isFieldIndexed, unwrapScalar } from '@/lib/astra/schema';
 import type { CollectionCapabilities } from '@/lib/astra/gateway';
 import {
@@ -30,6 +30,8 @@ interface RowDetailPanelProps {
 }
 
 const PANEL_WIDTH = 480;
+const MIN_WIDTH = 280;
+const MAX_WIDTH = 900;
 const MAX_CHILDREN = 200;
 
 function isContainer(value: unknown): value is Record<string, unknown> | unknown[] {
@@ -266,6 +268,44 @@ export default function RowDetailPanel({
   );
   const [view, setView] = useState<'tree' | 'raw'>('tree');
   const bodyRef = useRef<HTMLDivElement>(null);
+  const [panelWidth, setPanelWidth] = useState(PANEL_WIDTH);
+  const dragStartX = useRef<number | null>(null);
+  const dragStartWidth = useRef<number>(PANEL_WIDTH);
+
+  const onDragMouseMove = useCallback((e: MouseEvent) => {
+    if (dragStartX.current === null) return;
+    const delta = dragStartX.current - e.clientX;
+    const next = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, dragStartWidth.current + delta));
+    setPanelWidth(next);
+  }, []);
+
+  const onDragMouseUp = useCallback(() => {
+    dragStartX.current = null;
+    document.removeEventListener('mousemove', onDragMouseMove);
+    document.removeEventListener('mouseup', onDragMouseUp);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }, [onDragMouseMove]);
+
+  const onDragMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      dragStartX.current = e.clientX;
+      dragStartWidth.current = panelWidth;
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      document.addEventListener('mousemove', onDragMouseMove);
+      document.addEventListener('mouseup', onDragMouseUp);
+    },
+    [panelWidth, onDragMouseMove, onDragMouseUp],
+  );
+
+  useEffect(() => {
+    return () => {
+      document.removeEventListener('mousemove', onDragMouseMove);
+      document.removeEventListener('mouseup', onDragMouseUp);
+    };
+  }, [onDragMouseMove, onDragMouseUp]);
 
   // A new focus on the already-open row: show the field tree and expand down to the field.
   const [appliedFocus, setAppliedFocus] = useState(focus);
@@ -335,19 +375,49 @@ export default function RowDetailPanel({
   return (
     <aside
       aria-label="Row detail"
-      className="flex flex-col flex-shrink-0 min-h-0 border-l"
+      className="flex flex-col flex-shrink-0 min-h-0 relative"
       style={{
-        width: PANEL_WIDTH,
+        width: panelWidth,
         maxWidth: '50vw',
         background: 'var(--astra-sidebar)',
-        borderColor: 'var(--astra-border)',
         color: 'var(--astra-text)',
         animation: 'astra-slide-in 150ms ease-out',
       }}
     >
+      {/* Drag handle — sits on the left border */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize panel"
+        className="absolute left-0 top-0 bottom-0 z-10 flex items-center justify-center"
+        style={{ width: 5, cursor: 'col-resize', borderLeft: '1px solid var(--astra-border)' }}
+        onMouseDown={onDragMouseDown}
+      >
+        {/* Subtle grip dots */}
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 3,
+            pointerEvents: 'none',
+          }}
+        >
+          {[0, 1, 2].map((i) => (
+            <div
+              key={i}
+              style={{
+                width: 3,
+                height: 3,
+                borderRadius: '50%',
+                background: 'var(--astra-border)',
+              }}
+            />
+          ))}
+        </div>
+      </div>
       <div
         className="flex items-center gap-2 border-b px-3 py-2"
-        style={{ borderColor: 'var(--astra-border)' }}
+        style={{ borderColor: 'var(--astra-border)', paddingLeft: '1rem' }}
       >
         <button
           type="button"
