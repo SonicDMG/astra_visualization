@@ -197,12 +197,16 @@ export function describeCall(call: DataApiCallInfo): { title: string; detail: st
   }
 }
 
-/** Copy-able form of a call, so users can reproduce it. The token is never included. */
+/**
+ * Copy-able form of a call, so users can reproduce it. The token is never included. The response
+ * is piped through jq for readable output (curl -s keeps its progress meter out of the pipe).
+ */
 export function callAsCurl(call: DataApiCallInfo): string {
   return [
-    `curl -X ${call.method} "$ASTRA_DB_API_ENDPOINT${call.path}" \\`,
+    `curl -s -X ${call.method} "$ASTRA_DB_API_ENDPOINT${call.path}" \\`,
     `  -H "Token: $ASTRA_DB_APPLICATION_TOKEN" \\`,
     `  -H "Content-Type: application/json" \\`,
-    `  -d '${JSON.stringify(call.body, null, 2)}'`,
+    `  -d '${JSON.stringify(call.body, null, 2)}' \\`,
+    `  | jq .`,
   ].join('\n');
 }

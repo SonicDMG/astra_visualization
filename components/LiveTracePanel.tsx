@@ -43,6 +43,20 @@ export default function LiveTracePanel() {
   // Chosen box in the diagram; reset whenever a different run is shown.
   const [selection, setSelection] = useState<{ runId: string; index: number } | null>(null);
   const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
+
+  // Confirm briefly; the button stays usable, and each click restarts the confirmation.
+  const confirmCopy = () => {
+    setCopied(true);
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = setTimeout(() => setCopied(false), 1800);
+  };
   const [panelHeight, setPanelHeight] = useState(DEFAULT_PANEL_PX);
   const [isResizing, setIsResizing] = useState(false);
   const dragRef = useRef<{ startY: number; startHeight: number } | null>(null);
@@ -278,21 +292,38 @@ export default function LiveTracePanel() {
                       >
                         {JSON.stringify(selectedStep.call.body, null, 2)}
                       </pre>
-                      <button
-                        type="button"
-                        className="self-start text-[11px] px-2 py-0.5 rounded border"
-                        style={{ borderColor: 'var(--astra-border)' }}
-                        onClick={() => {
-                          const call = selectedStep.call;
-                          if (!call) return;
-                          void navigator.clipboard
-                            .writeText(callAsCurl(call))
-                            .then(() => setCopied(true))
-                            .catch(() => setCopied(false));
-                        }}
-                      >
-                        {copied ? 'Copied curl command' : 'Copy as curl'}
-                      </button>
+                      <div className="relative self-start">
+                        <button
+                          type="button"
+                          className="text-[11px] px-2 py-0.5 rounded border cursor-pointer transition-[transform,background-color] duration-100 hover:bg-slate-800/40 active:translate-y-px active:scale-95 active:bg-slate-800/70 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-sky-400 motion-reduce:transition-none motion-reduce:active:transform-none"
+                          style={{ borderColor: 'var(--astra-border)' }}
+                          onClick={() => {
+                            const call = selectedStep.call;
+                            if (!call) return;
+                            void navigator.clipboard
+                              .writeText(callAsCurl(call))
+                              .then(confirmCopy)
+                              .catch(() => setCopied(false));
+                          }}
+                        >
+                          Copy as curl
+                        </button>
+                        {copied && (
+                          <span
+                            aria-hidden="true"
+                            className="absolute left-full top-1/2 -translate-y-1/2 ml-2 whitespace-nowrap rounded px-2 py-0.5 text-[11px] font-medium pointer-events-none"
+                            style={{
+                              background: 'var(--astra-text)',
+                              color: 'var(--astra-bg)',
+                            }}
+                          >
+                            Copied to clipboard
+                          </span>
+                        )}
+                        <span role="status" aria-live="polite" className="sr-only">
+                          {copied ? 'Copied curl command to clipboard' : ''}
+                        </span>
+                      </div>
                     </>
                   ) : (
                     <>
