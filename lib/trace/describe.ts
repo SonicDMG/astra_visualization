@@ -125,6 +125,7 @@ type Body = {
   filter?: Record<string, unknown>;
   sort?: Record<string, unknown>;
   options?: { skip?: number; limit?: number; pageState?: string };
+  update?: Record<string, unknown>;
 };
 
 function bodyOf(call: DataApiCallInfo): Body {
@@ -139,6 +140,7 @@ export function callSummary(call: DataApiCallInfo): string {
   const body = bodyOf(call);
   const parts = [call.command];
   if (body.filter && Object.keys(body.filter).length > 0) parts.push(`filter ${compact(body.filter, 60)}`);
+  if (body.update) parts.push(`update ${compact(body.update, 60)}`);
   if (body.sort) parts.push(`sort ${compact(body.sort, 60)}`);
   if (body.options?.skip !== undefined) parts.push(`skip ${body.options.skip}`);
   if (body.options?.limit !== undefined) parts.push(`limit ${body.options.limit}`);
@@ -151,6 +153,11 @@ export function describeCall(call: DataApiCallInfo): { title: string; detail: st
   const body = bodyOf(call);
   const sortKeys = body.sort ? Object.keys(body.sort) : [];
   switch (call.command) {
+    case 'updateOne':
+      return {
+        title: 'Astra updates the document',
+        detail: 'Executes an updateOne command to persist the updated field value.',
+      };
     case 'find': {
       if (sortKeys.some((k) => SEARCH_SORT_KEYS.includes(k))) {
         const how = sortKeys.includes('$lexical')
@@ -202,6 +209,7 @@ const CONSOLE_COMMANDS: Record<string, string> = {
   find: 'Find documents',
   findOne: 'Find one document',
   countDocuments: 'Count documents',
+  updateOne: 'Update one document',
 };
 
 /**

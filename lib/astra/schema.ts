@@ -175,7 +175,7 @@ export function unwrapScalar(value: unknown): unknown {
   return value;
 }
 
-function inferType(value: unknown): FieldType {
+export function inferType(value: unknown): FieldType {
   if (value === null) return 'null';
   if (Array.isArray(value)) return 'array';
   if (typeof value === 'string') return ISO_DATE_PATTERN.test(value) ? 'isoDate' : 'string';
@@ -242,6 +242,54 @@ export function deriveFields(documents: Record<string, unknown>[]): FieldInfo[] 
     if (a.path < b.path) return -1;
     return a.path > b.path ? 1 : 0;
   });
+}
+
+/**
+ * Checks whether a given field path can be edited.
+ * In Astra DB Data API:
+ * - `_id` is an immutable primary key that cannot be modified after document creation.
+ * - `$similarity` is a synthetic query-time score and cannot be persisted.
+ */
+export function isFieldEditable(escapedPath: string): { editable: boolean; reason?: string } {
+  if (escapedPath === '_id' || escapedPath.startsWith('_id.') || escapedPath.startsWith('_id/')) {
+    return {
+      editable: false,
+      reason: 'The _id field is an immutable primary key in Astra DB and cannot be edited.',
+    };
+  }
+  if (escapedPath === '$similarity') {
+    return {
+      editable: false,
+      reason: 'Synthetic similarity score computed dynamically; not a stored document field.',
+    };
+  }
+  return { editable: true };
+}
+
+/**
+ * Returns a new document with the value at `escapedPath` updated.
+ * Handles nested objects immutably.
+ */
+export function setByEscapedPath(
+  doc: Record<string, unknown>,
+  escapedPath: string,
+  value: unknown,
+): Record<string, unknown> {
+  const segments = splitEscapedPath(escapedPath).map(unescapeFieldSegment);
+  if (segments.length === 0) return doc;
+
+  function updateRec(current: unknown, index: number): unknown {
+    if (index === segments.length) {
+      return value;
+    }
+    const key = segments[index];
+    const isObj = isPlainObject(current);
+    const base = isObj ? { ...(current as Record<string, unknown>) } : {};
+    base[key] = updateRec(isObj ? (current as Record<string, unknown>)[key] : undefined, index + 1);
+    return base;
+  }
+
+  return updateRec(doc, 0) as Record<string, unknown>;
 }
 
 /** Stable identity for a document, used to match rows across refetches. */

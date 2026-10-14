@@ -21,6 +21,9 @@ const BAD_REQUEST_CODES: ReadonlySet<string> = new Set([
   'SEARCH_VECTOR_REQUIRED',
   'SEARCH_VECTOR_DIMENSION',
   'SEARCH_VECTORIZE_UNAVAILABLE',
+  'CANNOT_UPDATE_ID',
+  'READ_ONLY_FIELD',
+  'INVALID_FIELD_TYPE',
 ]);
 
 /** Missing collection or missing "Find similar" source (404). */

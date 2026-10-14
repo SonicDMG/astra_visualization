@@ -1,7 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { isFieldIndexed, unwrapScalar } from '@/lib/astra/schema';
+import {
+  isFieldIndexed,
+  isFieldEditable,
+  setByEscapedPath,
+  unwrapScalar,
+} from '@/lib/astra/schema';
 import type { CollectionCapabilities } from '@/lib/astra/gateway';
 import {
   displayPath,
@@ -10,16 +15,21 @@ import {
   unescapeFieldSegment,
 } from '@/lib/query/compile';
 import type { FilterValue } from '@/lib/query/types';
+import FieldEditor from './FieldEditor';
 
 type Doc = Record<string, unknown>;
 
 interface RowDetailPanelProps {
   doc: Doc;
+  keyspace: string;
+  collection: string;
   onClose: () => void;
   /** Provided only for vector collections; enables the "Find similar" button. */
   onFindSimilar?: (doc: Doc) => void;
   /** Adds an `eq` filter for a scalar field. `field` is an escaped dotted path. */
   onQuickFilter?: (field: string, value: FilterValue) => void;
+  /** Notifies parent when a field is edited and saved. */
+  onUpdateDoc?: (updatedDoc: Doc) => void;
   /** Collection indexing options; quick filter is offered only for indexed fields. */
   indexing?: CollectionCapabilities['indexing'];
   /**
@@ -140,6 +150,14 @@ interface JsonNodeProps {
   inArray?: boolean;
   onQuickFilter?: (field: string, value: FilterValue) => void;
   indexing?: CollectionCapabilities['indexing'];
+  editingPath: string | null;
+  onStartEdit: (path: string) => void;
+  onCancelEdit: () => void;
+  onSaveEdit: (escapedPath: string, newValue: unknown) => void;
+  keyspace: string;
+  collection: string;
+  docId: unknown;
+  allowEdit: boolean;
 }
 
 function JsonNode({
@@ -151,17 +169,46 @@ function JsonNode({
   inArray,
   onQuickFilter,
   indexing,
+  editingPath,
+  onStartEdit,
+  onCancelEdit,
+  onSaveEdit,
+  keyspace,
+  collection,
+  docId,
+  allowEdit,
 }: JsonNodeProps) {
+  const escapedField = !inArray ? panelPathToEscapedField(path) : '';
+  const { editable, reason: readOnlyReason } = isFieldEditable(escapedField);
+  const isCurrentlyEditing = editingPath === path;
+
+  if (isCurrentlyEditing && escapedField !== '') {
+    return (
+      <div data-path={path} className="py-1 pl-2">
+        <FieldEditor
+          name={name}
+          escapedPath={escapedField}
+          currentValue={value}
+          keyspace={keyspace}
+          collection={collection}
+          docId={docId}
+          onSaveSuccess={(updatedVal) => onSaveEdit(escapedField, updatedVal)}
+          onCancel={onCancelEdit}
+        />
+      </div>
+    );
+  }
+
   if (!isContainer(value)) {
-    const field = onQuickFilter !== undefined && !inArray ? panelPathToEscapedField(path) : '';
     const filterable =
       onQuickFilter !== undefined &&
-      field !== '' &&
+      escapedField !== '' &&
       isFilterValue(value) &&
-      isFieldIndexed(field, indexing);
-    const label = filterable ? `Filter where ${displayPath(field)} = ${JSON.stringify(value)}` : '';
+      isFieldIndexed(escapedField, indexing);
+    const label = filterable ? `Filter where ${displayPath(escapedField)} = ${JSON.stringify(value)}` : '';
+
     return (
-      <div data-path={path} className="group relative py-0.5 pl-4 break-all">
+      <div data-path={path} className="group relative flex items-center py-0.5 pl-4 break-all flex-wrap">
         {filterable && (
           <button
             type="button"
@@ -169,7 +216,7 @@ function JsonNode({
             style={{ color: 'var(--astra-accent)' }}
             title={label}
             aria-label={label}
-            onClick={() => onQuickFilter(field, value)}
+            onClick={() => onQuickFilter(escapedField, value)}
           >
             <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
               <path d="M1 2h14l-5.5 6.5V14l-3-1.5V8.5L1 2z" />
@@ -177,7 +224,43 @@ function JsonNode({
           </button>
         )}
         <span style={{ color: 'var(--astra-muted)' }}>{name}: </span>
-        <span style={scalarStyle(value)}>{JSON.stringify(value) ?? String(value)}</span>
+        <span style={scalarStyle(value)} className="ml-1">
+          {JSON.stringify(value) ?? String(value)}
+        </span>
+
+        {/* Read-only indicator */}
+        {!inArray && !editable && (
+          <span
+            className="inline-flex items-center gap-1 ml-2 px-1.5 py-0.2 rounded text-[10px] font-sans opacity-75"
+            style={{
+              background: 'var(--astra-surface)',
+              color: 'var(--astra-muted)',
+              border: '1px solid var(--astra-border)',
+            }}
+            title={readOnlyReason ?? 'Read-only field'}
+          >
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path fillRule="evenodd" d="M4 4v2h-.5A1.5 1.5 0 0 0 2 7.5v6A1.5 1.5 0 0 0 3.5 15h9a1.5 1.5 0 0 0 1.5-1.5v-6A1.5 1.5 0 0 0 12.5 6H12V4a4 4 0 0 0-8 0zm6.5 2V4a2.5 2.5 0 0 0-5 0v2h5z" />
+            </svg>
+            <span>Read-only</span>
+          </span>
+        )}
+
+        {/* Inline edit button */}
+        {!inArray && editable && allowEdit && (
+          <button
+            type="button"
+            className="ml-1.5 inline-flex items-center justify-center h-4 w-4 rounded opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+            style={{ color: 'var(--astra-accent)' }}
+            title={`Edit ${name}`}
+            aria-label={`Edit ${name}`}
+            onClick={() => onStartEdit(path)}
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25a2.25 2.25 0 0 1 .446-.757l8.609-8.61zm1.414 1.06a.25.25 0 0 0-.354 0L10.8 3.76l1.44 1.44 1.273-1.273a.25.25 0 0 0 0-.354l-1.086-1.086zM11.18 6.26 9.74 4.82 3.32 11.24a.75.75 0 0 0-.149.252l-.59 2.064 2.064-.59a.75.75 0 0 0 .252-.149L11.18 6.26z" />
+            </svg>
+          </button>
+        )}
       </div>
     );
   }
@@ -190,12 +273,26 @@ function JsonNode({
 
   if (entries.length === 0) {
     return (
-      <div data-path={path} className="py-0.5 pl-4">
+      <div data-path={path} className="group flex items-center py-0.5 pl-4">
         <span style={{ color: 'var(--astra-muted)' }}>{name}: </span>
         <span>
           {open}
           {close}
         </span>
+        {!inArray && editable && allowEdit && (
+          <button
+            type="button"
+            className="ml-1.5 inline-flex items-center justify-center h-4 w-4 rounded opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+            style={{ color: 'var(--astra-accent)' }}
+            title={`Edit ${name}`}
+            aria-label={`Edit ${name}`}
+            onClick={() => onStartEdit(path)}
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25a2.25 2.25 0 0 1 .446-.757l8.609-8.61zm1.414 1.06a.25.25 0 0 0-.354 0L10.8 3.76l1.44 1.44 1.273-1.273a.25.25 0 0 0 0-.354l-1.086-1.086zM11.18 6.26 9.74 4.82 3.32 11.24a.75.75 0 0 0-.149.252l-.59 2.064 2.064-.59a.75.75 0 0 0 .252-.149L11.18 6.26z" />
+            </svg>
+          </button>
+        )}
       </div>
     );
   }
@@ -205,18 +302,36 @@ function JsonNode({
 
   return (
     <div data-path={path}>
-      <button
-        type="button"
-        className="flex items-center gap-1 py-0.5 text-left"
-        aria-expanded={isOpen}
-        onClick={() => onToggle(path)}
-      >
-        <span className="inline-block w-3 text-center" aria-hidden="true">
-          {isOpen ? '▾' : '▸'}
-        </span>
-        <span style={{ color: 'var(--astra-muted)' }}>{name}: </span>
-        <span>{isOpen ? open : `${open} ${summary} ${close}`}</span>
-      </button>
+      <div className="group flex items-center py-0.5">
+        <button
+          type="button"
+          className="flex items-center gap-1 text-left"
+          aria-expanded={isOpen}
+          onClick={() => onToggle(path)}
+        >
+          <span className="inline-block w-3 text-center" aria-hidden="true">
+            {isOpen ? '▾' : '▸'}
+          </span>
+          <span style={{ color: 'var(--astra-muted)' }}>{name}: </span>
+          <span>{isOpen ? open : `${open} ${summary} ${close}`}</span>
+        </button>
+
+        {!inArray && editable && allowEdit && (
+          <button
+            type="button"
+            className="ml-1.5 inline-flex items-center justify-center h-4 w-4 rounded opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+            style={{ color: 'var(--astra-accent)' }}
+            title={`Edit ${name}`}
+            aria-label={`Edit ${name}`}
+            onClick={() => onStartEdit(path)}
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25a2.25 2.25 0 0 1 .446-.757l8.609-8.61zm1.414 1.06a.25.25 0 0 0-.354 0L10.8 3.76l1.44 1.44 1.273-1.273a.25.25 0 0 0 0-.354l-1.086-1.086zM11.18 6.26 9.74 4.82 3.32 11.24a.75.75 0 0 0-.149.252l-.59 2.064 2.064-.59a.75.75 0 0 0 .252-.149L11.18 6.26z" />
+            </svg>
+          </button>
+        )}
+      </div>
+
       {isOpen && (
         <>
           <div className="ml-1.5 border-l pl-3" style={{ borderColor: 'var(--astra-border)' }}>
@@ -231,6 +346,14 @@ function JsonNode({
                 inArray={isArray}
                 onQuickFilter={onQuickFilter}
                 indexing={indexing}
+                editingPath={editingPath}
+                onStartEdit={onStartEdit}
+                onCancelEdit={onCancelEdit}
+                onSaveEdit={onSaveEdit}
+                keyspace={keyspace}
+                collection={collection}
+                docId={docId}
+                allowEdit={allowEdit}
               />
             ))}
             {entries.length > MAX_CHILDREN && (
@@ -256,9 +379,12 @@ function initialExpanded(doc: Doc): Set<string> {
 
 export default function RowDetailPanel({
   doc,
+  keyspace,
+  collection,
   onClose,
   onFindSimilar,
   onQuickFilter,
+  onUpdateDoc,
   indexing,
   focus = null,
 }: RowDetailPanelProps) {
@@ -267,45 +393,36 @@ export default function RowDetailPanel({
     focus ? expandToField(initialExpanded(doc), focus.field) : initialExpanded(doc),
   );
   const [view, setView] = useState<'tree' | 'raw'>('tree');
+  const [editingPath, setEditingPath] = useState<string | null>(null);
+  const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const [panelWidth, setPanelWidth] = useState(PANEL_WIDTH);
-  const dragStartX = useRef<number | null>(null);
-  const dragStartWidth = useRef<number>(PANEL_WIDTH);
-
-  const onDragMouseMove = useCallback((e: MouseEvent) => {
-    if (dragStartX.current === null) return;
-    const delta = dragStartX.current - e.clientX;
-    const next = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, dragStartWidth.current + delta));
-    setPanelWidth(next);
-  }, []);
-
-  const onDragMouseUp = useCallback(() => {
-    dragStartX.current = null;
-    document.removeEventListener('mousemove', onDragMouseMove);
-    document.removeEventListener('mouseup', onDragMouseUp);
-    document.body.style.cursor = '';
-    document.body.style.userSelect = '';
-  }, [onDragMouseMove]);
-
   const onDragMouseDown = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
-      dragStartX.current = e.clientX;
-      dragStartWidth.current = panelWidth;
+      const startX = e.clientX;
+      const startWidth = panelWidth;
       document.body.style.cursor = 'col-resize';
       document.body.style.userSelect = 'none';
-      document.addEventListener('mousemove', onDragMouseMove);
-      document.addEventListener('mouseup', onDragMouseUp);
-    },
-    [panelWidth, onDragMouseMove, onDragMouseUp],
-  );
 
-  useEffect(() => {
-    return () => {
-      document.removeEventListener('mousemove', onDragMouseMove);
-      document.removeEventListener('mouseup', onDragMouseUp);
-    };
-  }, [onDragMouseMove, onDragMouseUp]);
+      const handleMouseMove = (moveEvent: MouseEvent) => {
+        const delta = startX - moveEvent.clientX;
+        const next = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth + delta));
+        setPanelWidth(next);
+      };
+
+      const handleMouseUp = () => {
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      };
+
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    },
+    [panelWidth],
+  );
 
   // A new focus on the already-open row: show the field tree and expand down to the field.
   const [appliedFocus, setAppliedFocus] = useState(focus);
@@ -333,6 +450,7 @@ export default function RowDetailPanel({
       { duration: 1500, easing: 'ease-out' },
     );
   }, [focus]);
+
   const [copied, setCopied] = useState<'json' | 'id' | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -363,6 +481,23 @@ export default function RowDetailPanel({
       .catch(() => {
         // Clipboard may be unavailable (insecure context / permission denied).
       });
+  };
+
+  const handleStartEdit = (path: string) => {
+    setEditingPath(path);
+    setSaveSuccessMsg(null);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingPath(null);
+  };
+
+  const handleSaveEdit = (escapedField: string, newValue: unknown) => {
+    const updated = setByEscapedPath(doc, escapedField, newValue);
+    setEditingPath(null);
+    setSaveSuccessMsg(`Updated ${displayPath(escapedField)} successfully.`);
+    setTimeout(() => setSaveSuccessMsg(null), 3000);
+    onUpdateDoc?.(updated);
   };
 
   const buttonClass = 'px-2 py-1 text-xs font-medium rounded border disabled:opacity-40';
@@ -415,6 +550,7 @@ export default function RowDetailPanel({
           ))}
         </div>
       </div>
+
       <div
         className="flex items-center gap-2 border-b px-3 py-2"
         style={{ borderColor: 'var(--astra-border)', paddingLeft: '1rem' }}
@@ -463,6 +599,21 @@ export default function RowDetailPanel({
         </button>
       </div>
 
+      {saveSuccessMsg && (
+        <div
+          role="status"
+          className="mx-3 mt-2 flex items-center gap-2 rounded border px-2.5 py-1.5 text-xs animate-fade-in"
+          style={{
+            background: 'color-mix(in srgb, #2ea043 15%, transparent)',
+            borderColor: '#2ea043',
+            color: '#7ee787',
+          }}
+        >
+          <span>✓</span>
+          <span>{saveSuccessMsg}</span>
+        </div>
+      )}
+
       <div
         className="flex gap-1 border-b px-3 py-1.5"
         style={{ borderColor: 'var(--astra-border)' }}
@@ -498,6 +649,14 @@ export default function RowDetailPanel({
               onToggle={toggle}
               onQuickFilter={onQuickFilter}
               indexing={indexing}
+              editingPath={editingPath}
+              onStartEdit={handleStartEdit}
+              onCancelEdit={handleCancelEdit}
+              onSaveEdit={handleSaveEdit}
+              keyspace={keyspace}
+              collection={collection}
+              docId={doc._id}
+              allowEdit={Boolean(onUpdateDoc)}
             />
           ))}
         </div>

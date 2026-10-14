@@ -283,6 +283,14 @@ export type CountResult = {
   calls?: DataApiCallInfo[];
 };
 
+export type UpdateResult = {
+  matchedCount: number;
+  modifiedCount: number;
+  error?: string;
+  errorCode?: string;
+  calls?: DataApiCallInfo[];
+};
+
 export type QueryOptions = {
   /** Data API projection. Defaults to `{ $vector: 0 }` (vector hidden). */
   projection?: Record<string, 0 | 1>;
@@ -602,6 +610,85 @@ export async function count(
       isEstimate: false,
       isOver1000: false,
       error: `Failed to count documents: ${message}`,
+      calls: callsOut(),
+    };
+  }
+}
+
+/**
+ * Updates a single document field in Astra DB using updateOne.
+ */
+export async function updateDocumentField(
+  keyspace: string,
+  collection: string,
+  id: DocId,
+  field: string,
+  value: unknown,
+  options?: { includeTrace?: boolean },
+): Promise<UpdateResult> {
+  const calls: DataApiCallInfo[] = [];
+  const callsOut = () => (options?.includeTrace ? calls : undefined);
+
+  if (field === '_id' || field.startsWith('_id.') || field.startsWith('_id/')) {
+    return {
+      matchedCount: 0,
+      modifiedCount: 0,
+      error: 'The _id field is immutable and cannot be updated.',
+      errorCode: 'CANNOT_UPDATE_ID',
+      calls: callsOut(),
+    };
+  }
+
+  if (field === '$similarity') {
+    return {
+      matchedCount: 0,
+      modifiedCount: 0,
+      error: 'The $similarity field is a synthetic search score and cannot be updated.',
+      errorCode: 'READ_ONLY_FIELD',
+      calls: callsOut(),
+    };
+  }
+
+  try {
+    const { DataAPIClient } = await import('@datastax/astra-db-ts');
+    const client = new DataAPIClient(TOKEN);
+    const db = client.db(ENDPOINT, { keyspace });
+
+    const response = await timedCommand(db, calls, keyspace, collection, {
+      updateOne: {
+        filter: { _id: id },
+        update: {
+          $set: {
+            [field]: value,
+          },
+        },
+      },
+    });
+
+    const apiError = mapDataApiErrors(response.errors);
+    if (apiError) {
+      return {
+        matchedCount: 0,
+        modifiedCount: 0,
+        error: apiError.error,
+        errorCode: apiError.errorCode,
+        calls: callsOut(),
+      };
+    }
+
+    const status = response.status as { matchedCount?: number; modifiedCount?: number } | undefined;
+    return {
+      matchedCount: status?.matchedCount ?? 1,
+      modifiedCount: status?.modifiedCount ?? 1,
+      calls: callsOut(),
+    };
+  } catch (err) {
+    const apiError = await toApiError(err, 'Failed to update document');
+    return {
+      matchedCount: 0,
+      modifiedCount: 0,
+      error: apiError.error,
+      errorCode: apiError.errorCode,
       calls: callsOut(),
     };
   }

@@ -561,6 +561,13 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
     [spec.filter, applyFilter],
   );
 
+  const handleDocumentUpdate = useCallback((updatedDoc: Doc) => {
+    setSelectedDoc(updatedDoc);
+    setDocuments((prev) =>
+      prev.map((d) => (docKey(d) === docKey(updatedDoc) ? updatedDoc : d)),
+    );
+  }, []);
+
   const buttonClass =
     'px-3 py-1 text-xs font-medium rounded border disabled:opacity-40 disabled:cursor-not-allowed';
   const buttonStyle = {
@@ -871,9 +878,12 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
           <RowDetailPanel
             key={docKey(selectedDoc)}
             doc={selectedDoc}
+            keyspace={keyspace}
+            collection={collection}
             onClose={() => setSelectedDoc(null)}
             onFindSimilar={canFindSimilar ? findSimilar : undefined}
             onQuickFilter={handleQuickFilter}
+            onUpdateDoc={handleDocumentUpdate}
             indexing={indexing}
             focus={focusField}
           />
