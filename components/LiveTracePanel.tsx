@@ -11,6 +11,7 @@ import {
 } from '@/lib/trace/describe';
 import type { TraceHandling, TraceRun } from '@/lib/trace/types';
 import { QueryFlowDiagram } from './QueryFlowDiagram';
+import { highlightJson } from '@/lib/ui/highlightJson';
 
 const IDLE_HANDLING: { handling: TraceHandling; text: string }[] = [
   { handling: 'local', text: 'Re-sorting search results you already have. Nothing is sent to Astra.' },
@@ -381,8 +382,8 @@ export default function LiveTracePanel() {
                           </svg>
                         </button>
                         <pre className="font-mono text-[11px] leading-snug p-1.5 m-0">
-                          {JSON.stringify(selectedStep.call.body, null, 2)}
-                        </pre>
+                           {highlightJson(selectedStep.call.body)}
+                         </pre>
                         </div>
                         <span role="status" aria-live="polite" className="sr-only">
                           {jsonCopied ? 'Copied JSON to clipboard' : ''}
