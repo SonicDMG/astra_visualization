@@ -197,6 +197,35 @@ export function describeCall(call: DataApiCallInfo): { title: string; detail: st
   }
 }
 
+/** Commands the Astra API Console offers, keyed by Data API command, with the name it shows. */
+const CONSOLE_COMMANDS: Record<string, string> = {
+  find: 'Find documents',
+  findOne: 'Find one document',
+  countDocuments: 'Count documents',
+};
+
+/**
+ * Whether a call can be pasted into the Astra API Console, and if so which command to choose
+ * there (the console rejects a body that does not match its selected command).
+ */
+export function consoleTarget(
+  call: DataApiCallInfo,
+): { ok: true; label: string } | { ok: false; reason: string } {
+  // bodyForDisplay shortens long vectors to a "[N numbers]" string, which is not valid to send.
+  if (/"\[\d+ numbers\]"/.test(JSON.stringify(call.body))) {
+    return { ok: false, reason: 'This request contains a long vector that is shortened for display.' };
+  }
+  if (call.command === 'findCollections') {
+    const explain = (call.body as { findCollections?: { options?: { explain?: boolean } } })
+      .findCollections?.options?.explain;
+    return { ok: true, label: explain ? 'List collection metadata' : 'List collection names' };
+  }
+  const label = CONSOLE_COMMANDS[call.command];
+  return label
+    ? { ok: true, label }
+    : { ok: false, reason: `The API Console does not offer the ${call.command} command.` };
+}
+
 /**
  * Copy-able form of a call, so users can reproduce it. The token is never included. The response
  * is piped through jq for readable output (curl -s keeps its progress meter out of the pipe).

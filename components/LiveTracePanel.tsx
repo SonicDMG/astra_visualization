@@ -7,6 +7,7 @@ import {
   HANDLING_LABEL,
   HANDLING_SHORT,
   callAsCurl,
+  consoleTarget,
 } from '@/lib/trace/describe';
 import type { TraceHandling, TraceRun } from '@/lib/trace/types';
 import { QueryFlowDiagram } from './QueryFlowDiagram';
@@ -28,6 +29,8 @@ const MIN_PANEL_PX = 220;
 const DEFAULT_PANEL_PX = 420;
 const MIN_REMAINING_PX = 160; // always leave room for the results grid
 const KEY_STEP_PX = 24;
+const ACTION_BUTTON_CLASS =
+  'text-[11px] px-2 py-0.5 rounded border cursor-pointer transition-[transform,background-color] duration-100 hover:bg-slate-800/40 active:translate-y-px active:scale-95 active:bg-slate-800/70 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-sky-400 motion-reduce:transition-none motion-reduce:active:transform-none';
 
 export default function LiveTracePanel() {
   const {
@@ -42,8 +45,11 @@ export default function LiveTracePanel() {
   const [inspectRunId, setInspectRunId] = useState<string | null>(null);
   // Chosen box in the diagram; reset whenever a different run is shown.
   const [selection, setSelection] = useState<{ runId: string; index: number } | null>(null);
-  const [copied, setCopied] = useState(false);
+  // Message shown in the ephemeral tooltip next to the copy buttons (null = hidden).
+  const [toast, setToast] = useState<string | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Astra portal API Console for this database, or null if it could not be worked out.
+  const [consoleUrl, setConsoleUrl] = useState<string | null>(null);
 
   useEffect(() => {
     return () => {
@@ -51,11 +57,39 @@ export default function LiveTracePanel() {
     };
   }, []);
 
-  // Confirm briefly; the button stays usable, and each click restarts the confirmation.
-  const confirmCopy = () => {
-    setCopied(true);
+  // Looked up while the panel is open, so the console tab can open straight from a click
+  // (a window opened after an await would be blocked as a popup).
+  useEffect(() => {
+    if (!isPanelOpen || consoleUrl) return;
+    let cancelled = false;
+    fetch('/api/keyspaces')
+      .then((res) => res.json())
+      .then((data: { consoleBaseUrl?: string | null }) => {
+        if (!cancelled && data.consoleBaseUrl) setConsoleUrl(data.consoleBaseUrl);
+      })
+      .catch(() => {
+        // The button just stays hidden.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isPanelOpen, consoleUrl]);
+
+  // Confirm briefly; the buttons stay usable, and each click restarts the confirmation.
+  const showToast = (message: string, ms = 1800) => {
+    setToast(message);
     if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
-    copyTimerRef.current = setTimeout(() => setCopied(false), 1800);
+    copyTimerRef.current = setTimeout(() => setToast(null), ms);
+  };
+
+  // The console cannot be prefilled from a link, so the request goes on the clipboard and the
+  // console opens for a paste. `label` is the command the user must pick there.
+  const sendToConsole = (url: string, body: unknown, label: string) => {
+    window.open(url, '_blank', 'noopener');
+    void navigator.clipboard
+      .writeText(JSON.stringify(body, null, 2))
+      .then(() => showToast(`Request copied. In the console choose "${label}", then paste.`, 6000))
+      .catch(() => setToast(null));
   };
   const [panelHeight, setPanelHeight] = useState(DEFAULT_PANEL_PX);
   const [isResizing, setIsResizing] = useState(false);
@@ -254,7 +288,7 @@ export default function LiveTracePanel() {
                 activeStepIndex={activeRun.activeStepIndex}
                 selectedIndex={selectedIndex}
                 onSelect={(index) => {
-                  setCopied(false);
+                  setToast(null);
                   setSelection({ runId: activeRun.id, index });
                 }}
               />
@@ -292,36 +326,56 @@ export default function LiveTracePanel() {
                       >
                         {JSON.stringify(selectedStep.call.body, null, 2)}
                       </pre>
-                      <div className="relative self-start">
+                      <div className="relative self-start flex items-center gap-2 flex-wrap">
                         <button
                           type="button"
-                          className="text-[11px] px-2 py-0.5 rounded border cursor-pointer transition-[transform,background-color] duration-100 hover:bg-slate-800/40 active:translate-y-px active:scale-95 active:bg-slate-800/70 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-sky-400 motion-reduce:transition-none motion-reduce:active:transform-none"
+                          className={ACTION_BUTTON_CLASS}
                           style={{ borderColor: 'var(--astra-border)' }}
                           onClick={() => {
                             const call = selectedStep.call;
                             if (!call) return;
                             void navigator.clipboard
                               .writeText(callAsCurl(call))
-                              .then(confirmCopy)
-                              .catch(() => setCopied(false));
+                              .then(() => showToast('Copied to clipboard'))
+                              .catch(() => setToast(null));
                           }}
                         >
                           Copy as curl
                         </button>
-                        {copied && (
+                        {consoleUrl && (() => {
+                          const call = selectedStep.call;
+                          const target = consoleTarget(call);
+                          return (
+                            <button
+                              type="button"
+                              disabled={!target.ok}
+                              className={`${ACTION_BUTTON_CLASS} disabled:opacity-40 disabled:cursor-not-allowed disabled:active:transform-none`}
+                              style={{ borderColor: 'var(--astra-border)' }}
+                              title={
+                                target.ok
+                                  ? `Copies the request and opens the Astra API Console. There, choose "${target.label}" and paste.`
+                                  : target.reason
+                              }
+                              onClick={() => target.ok && sendToConsole(consoleUrl, call.body, target.label)}
+                            >
+                              Send to API Console
+                            </button>
+                          );
+                        })()}
+                        {toast && (
                           <span
                             aria-hidden="true"
-                            className="absolute left-full top-1/2 -translate-y-1/2 ml-2 whitespace-nowrap rounded px-2 py-0.5 text-[11px] font-medium pointer-events-none"
+                            className="absolute left-0 top-full mt-1.5 z-10 max-w-full rounded px-2 py-1 text-[11px] font-medium pointer-events-none"
                             style={{
                               background: 'var(--astra-text)',
                               color: 'var(--astra-bg)',
                             }}
                           >
-                            Copied to clipboard
+                            {toast}
                           </span>
                         )}
                         <span role="status" aria-live="polite" className="sr-only">
-                          {copied ? 'Copied curl command to clipboard' : ''}
+                          {toast ?? ''}
                         </span>
                       </div>
                     </>

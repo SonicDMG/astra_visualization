@@ -176,7 +176,9 @@ async function timedCommand(
 
 // ─── Gateway functions ──────────────────────────────────────────────────────
 
-export async function listKeyspaces(): Promise<{ keyspaces: string[] } | { error: string }> {
+export async function listKeyspaces(): Promise<
+  { keyspaces: string[]; consoleBaseUrl: string | null } | { error: string }
+> {
   try {
     const dbId = parseDbId(ENDPOINT);
     if (!dbId) {
@@ -191,9 +193,13 @@ export async function listKeyspaces(): Promise<{ keyspaces: string[] } | { error
       },
     });
 
-    const data = (await response.json()) as { info?: { keyspaces?: string[] } };
+    const data = (await response.json()) as { orgId?: string; info?: { keyspaces?: string[] } };
     const keyspaces = data.info?.keyspaces ?? [];
-    return { keyspaces };
+    // The Astra portal needs the org in the URL (without it the page is a 404).
+    const consoleBaseUrl = data.orgId
+      ? `https://astra.datastax.com/org/${data.orgId}/database/${dbId}/api-console`
+      : null;
+    return { keyspaces, consoleBaseUrl };
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     return { error: `Failed to list keyspaces: ${message}` };
