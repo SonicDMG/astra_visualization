@@ -82,6 +82,25 @@ export default function LiveTracePanel() {
     copyTimerRef.current = setTimeout(() => setToast(null), ms);
   };
 
+  // Plain copy of the request JSON as displayed (the curl button copies a full command instead).
+  const [jsonCopied, setJsonCopied] = useState(false);
+  const jsonTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (jsonTimerRef.current) clearTimeout(jsonTimerRef.current);
+    };
+  }, []);
+  const copyJson = (body: unknown) => {
+    void navigator.clipboard
+      .writeText(JSON.stringify(body, null, 2))
+      .then(() => {
+        setJsonCopied(true);
+        if (jsonTimerRef.current) clearTimeout(jsonTimerRef.current);
+        jsonTimerRef.current = setTimeout(() => setJsonCopied(false), 1500);
+      })
+      .catch(() => setJsonCopied(false));
+  };
+
   // The console cannot be prefilled from a link, so the request goes on the clipboard and the
   // console opens for a paste. `label` is the command the user must pick there.
   const sendToConsole = (url: string, body: unknown, label: string) => {
@@ -289,6 +308,7 @@ export default function LiveTracePanel() {
                 selectedIndex={selectedIndex}
                 onSelect={(index) => {
                   setToast(null);
+                  setJsonCopied(false);
                   setSelection({ runId: activeRun.id, index });
                 }}
               />
@@ -320,12 +340,54 @@ export default function LiveTracePanel() {
                         {selectedStep.call.method} {'{ASTRA_DB_API_ENDPOINT}'}
                         {selectedStep.call.path}
                       </div>
-                      <pre
-                        className="font-mono text-[11px] leading-snug overflow-auto max-h-28 rounded p-1.5 m-0"
-                        style={{ background: 'var(--astra-bg)' }}
-                      >
-                        {JSON.stringify(selectedStep.call.body, null, 2)}
-                      </pre>
+                      <div>
+                        {/* The button lives inside the scroll area (sticky, floated right), so it
+                            sits left of the scrollbar instead of covering it. */}
+                        <div
+                          className="overflow-auto max-h-28 rounded"
+                          style={{ background: 'var(--astra-bg)' }}
+                        >
+                        <button
+                          type="button"
+                          aria-label="Copy JSON"
+                          title="Copy JSON"
+                          className="sticky top-1 right-1 float-right mt-1 mr-1 z-10 w-6 h-6 flex items-center justify-center rounded border cursor-pointer transition-[transform,background-color] duration-100 hover:bg-slate-800/60 active:scale-90 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-sky-400 motion-reduce:transition-none motion-reduce:active:transform-none"
+                          style={{
+                            borderColor: 'var(--astra-border)',
+                            background: 'var(--astra-surface)',
+                            color: jsonCopied ? 'var(--astra-accent)' : 'var(--astra-muted)',
+                          }}
+                          onClick={() => copyJson(selectedStep.call?.body)}
+                        >
+                          <svg
+                            width="13"
+                            height="13"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            {jsonCopied ? (
+                              <path d="m3 8.5 3.2 3.2L13 4.8" />
+                            ) : (
+                              <>
+                                <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" />
+                                <path d="M10.5 5.5v-2a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3.5V9A1.5 1.5 0 0 0 4 10.5h1.5" />
+                              </>
+                            )}
+                          </svg>
+                        </button>
+                        <pre className="font-mono text-[11px] leading-snug p-1.5 m-0">
+                          {JSON.stringify(selectedStep.call.body, null, 2)}
+                        </pre>
+                        </div>
+                        <span role="status" aria-live="polite" className="sr-only">
+                          {jsonCopied ? 'Copied JSON to clipboard' : ''}
+                        </span>
+                      </div>
                       <div className="relative self-start flex items-center gap-2 flex-wrap">
                         <button
                           type="button"
