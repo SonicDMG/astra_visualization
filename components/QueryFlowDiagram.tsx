@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import type { StepWhere, TraceHandling, TraceStep } from '@/lib/trace/types';
 import { HANDLING_COLOR } from '@/lib/trace/describe';
@@ -32,6 +33,36 @@ const LANE_H = LANE_HEAD + NODE_H + 16;
 const LANE_GAP = 14;
 const OUTER = 8;
 const CORNER = 8;
+
+const ENTER_STAGGER_MS = 140; // gap between boxes that arrive in the same update
+const EDGE_LEAD_MS = 150; // an arrow starts fading in this long before the box it points to
+const EXIT_MS = 300; // how long a removed box fades out before it is dropped
+const RESIZE_MS = 450; // how long the diagram takes to change size
+
+/** Eases a number toward `target`, so the diagram resizes smoothly instead of snapping. */
+function useTween(target: number, ms: number): number {
+  const [value, setValue] = useState(target);
+  const valueRef = useRef(target);
+  useEffect(() => {
+    const from = valueRef.current;
+    if (from === target) return;
+    const reduced =
+      typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const duration = reduced ? 0 : ms;
+    const start = performance.now();
+    let frame = 0;
+    const tick = (now: number) => {
+      const t = duration === 0 ? 1 : Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - t, 3);
+      valueRef.current = from + (target - from) * eased;
+      setValue(valueRef.current);
+      if (t < 1) frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [target, ms]);
+  return value;
+}
 
 function nodeKind(step: TraceStep, handling: TraceHandling): NodeKind {
   if (step.status === 'error' || step.status === 'blocked') return 'security';
@@ -122,15 +153,49 @@ export function QueryFlowDiagram({
   selectedIndex,
   onSelect,
 }: QueryFlowDiagramProps) {
-  if (steps.length === 0) return null;
+  // When a new run replaces a longer one, the boxes that no longer exist fade out instead of
+  // vanishing. Adjusting state while rendering is the supported way to react to a prop change.
+  const [prevSteps, setPrevSteps] = useState(steps);
+  const [ghosts, setGhosts] = useState<{ step: TraceStep; index: number }[]>([]);
+  // Boxes at or after this index arrived in the latest update; they slide in one after another.
+  const [enterFrom, setEnterFrom] = useState(0);
+  if (prevSteps !== steps) {
+    setPrevSteps(steps);
+    setEnterFrom(Math.min(prevSteps.length, steps.length));
+    if (prevSteps.length > steps.length) {
+      setGhosts(prevSteps.slice(steps.length).map((step, k) => ({ step, index: steps.length + k })));
+    }
+  }
+  // While the new run is still in flight the old boxes stay as dimmed placeholders, so the layout
+  // holds still and the real boxes land on top of them. Once it settles, leftovers fade out.
+  const settled = steps.length > 0 && activeStepIndex === null;
+  useEffect(() => {
+    if (ghosts.length === 0 || !settled) return;
+    const timer = setTimeout(() => setGhosts([]), EXIT_MS + 50);
+    return () => clearTimeout(timer);
+  }, [ghosts, settled]);
 
-  const lanes = LANE_ORDER.filter((where) => steps.some((step) => step.where === where));
+  // Existing boxes keep their element (same key), so their entrance never replays.
+  const enterDelay = (index: number) => Math.max(0, index - enterFrom) * ENTER_STAGGER_MS;
+
+  const ghostClass = settled ? 'qf-exit' : 'qf-pending';
+  const visibleGhosts = ghosts.filter((ghost) => ghost.index >= steps.length);
+  const display: TraceStep[] = [...steps, ...visibleGhosts.map((ghost) => ghost.step)];
+  const count = display.length;
+
+  const lanes = LANE_ORDER.filter((where) => display.some((step) => step.where === where));
   const laneY = (where: StepWhere) => OUTER + lanes.indexOf(where) * (LANE_H + LANE_GAP);
   const nodeX = (index: number) => OUTER + LANE_PAD_X + index * (NODE_W + GAP);
   const nodeY = (step: TraceStep) => laneY(step.where) + LANE_HEAD;
 
-  const width = OUTER * 2 + LANE_PAD_X * 2 + steps.length * NODE_W + (steps.length - 1) * GAP;
-  const height = OUTER * 2 + lanes.length * LANE_H + (lanes.length - 1) * LANE_GAP;
+  const targetWidth =
+    count === 0 ? 0 : OUTER * 2 + LANE_PAD_X * 2 + count * NODE_W + (count - 1) * GAP;
+  const targetHeight =
+    count === 0 ? 0 : OUTER * 2 + lanes.length * LANE_H + (lanes.length - 1) * LANE_GAP;
+  const width = useTween(targetWidth, RESIZE_MS);
+  const height = useTween(targetHeight, RESIZE_MS);
+
+  if (count === 0) return null;
 
   const onKeyDown = (event: KeyboardEvent<SVGGElement>, index: number) => {
     if (event.key === 'Enter' || event.key === ' ') {
@@ -155,6 +220,23 @@ export function QueryFlowDiagram({
           --qf-mask: var(--astra-bg);
         }
         .query-flow svg { display: block; margin: 0 auto; }
+        .query-flow .qf-enter,
+        .query-flow .qf-edge-enter,
+        .query-flow .qf-lane-enter,
+        .query-flow .qf-pending,
+        .query-flow .qf-exit { transform-box: fill-box; transform-origin: center; }
+        .query-flow .qf-enter { animation: qf-enter .4s cubic-bezier(.2,.7,.2,1) var(--qf-delay, 0ms) both; }
+        .query-flow .qf-edge-enter { animation: qf-fade .35s ease var(--qf-delay, 0ms) both; }
+        .query-flow .qf-lane-enter { animation: qf-fade .4s ease both; }
+        .query-flow .qf-pending { animation: qf-dim .3s ease forwards; pointer-events: none; }
+        .query-flow .qf-exit { animation: qf-exit ${EXIT_MS}ms ease forwards; pointer-events: none; }
+        @keyframes qf-dim { from { opacity: 1; } to { opacity: .3; } }
+        @keyframes qf-enter {
+          from { opacity: 0; transform: translateX(-18px) scale(.94); }
+          to { opacity: 1; transform: none; }
+        }
+        @keyframes qf-fade { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes qf-exit { from { opacity: .3; } to { opacity: 0; transform: scale(.94); } }
         .query-flow .qf-lane { fill: var(--astra-sidebar); stroke: var(--astra-border); }
         .query-flow .qf-lane-label { fill: var(--astra-muted); font-size: 11px; font-weight: 600; }
         .query-flow .qf-mask { fill: var(--qf-mask); stroke: none; }
@@ -193,7 +275,12 @@ export function QueryFlowDiagram({
         @keyframes qf-flow { from { stroke-dashoffset: 18; } to { stroke-dashoffset: 0; } }
         @media (prefers-reduced-motion: reduce) {
           .query-flow [data-kind][data-active="true"] > .qf-card,
-          .query-flow .qf-edge[data-active="true"] { animation: none !important; }
+          .query-flow .qf-edge[data-active="true"],
+          .query-flow .qf-enter,
+          .query-flow .qf-edge-enter,
+          .query-flow .qf-lane-enter { animation: none !important; }
+          .query-flow .qf-pending,
+          .query-flow .qf-exit { animation-duration: 1ms !important; }
         }
       `}</style>
 
@@ -216,7 +303,7 @@ export function QueryFlowDiagram({
         </defs>
 
         {lanes.map((where, laneIndex) => (
-          <g key={where}>
+          <g key={where} className="qf-lane-enter">
             <rect
               className="qf-lane"
               x={OUTER}
@@ -232,9 +319,11 @@ export function QueryFlowDiagram({
           </g>
         ))}
 
-        {steps.slice(1).map((step, i) => {
-          const from = steps[i];
+        {display.slice(1).map((step, i) => {
+          const from = display[i];
           const index = i + 1;
+          const ghost = index >= steps.length;
+          const delay = ghost ? 0 : enterDelay(index) - EDGE_LEAD_MS;
           const x1 = nodeX(i) + NODE_W;
           const y1 = nodeY(from) + NODE_H / 2;
           const x2 = nodeX(index);
@@ -243,7 +332,11 @@ export function QueryFlowDiagram({
           const crossing = y1 !== y2;
           const chip = y2 > y1 ? 'request' : 'result';
           return (
-            <g key={`edge-${index}`}>
+            <g
+              key={ghost ? `ghost-edge-${index}` : `edge-${index}`}
+              className={ghost ? ghostClass : 'qf-edge-enter'}
+              style={{ ['--qf-delay' as string]: `${Math.max(0, delay)}ms` }}
+            >
               <path
                 className="qf-edge"
                 d={edgePath(x1, y1, x2, y2)}
@@ -275,7 +368,8 @@ export function QueryFlowDiagram({
           );
         })}
 
-        {steps.map((step, index) => {
+        {display.map((step, index) => {
+          const ghost = index >= steps.length;
           const x = nodeX(index);
           const y = nodeY(step);
           const failed = step.status === 'error' || step.status === 'blocked';
@@ -286,9 +380,38 @@ export function QueryFlowDiagram({
           ].filter(Boolean);
           const tag = tagParts.join(' · ');
           const full = [step.label, step.detail, step.endpoint].filter(Boolean).join(' — ');
+          if (ghost) {
+            return (
+              <g
+                key={`ghost-${step.where}-${index}`}
+                className={ghostClass}
+                data-kind={nodeKind(step, handling)}
+                aria-hidden="true"
+              >
+                <rect className="qf-mask" x={x} y={y} width={NODE_W} height={NODE_H} rx={8} />
+                <rect className="qf-card" x={x} y={y} width={NODE_W} height={NODE_H} rx={8} />
+                <text className="qf-title" x={x + NODE_W / 2 + 8} y={y + 21} textAnchor="middle">
+                  {truncate(step.label, 21)}
+                </text>
+                {subLines.map((line, lineIndex) => (
+                  <text
+                    key={lineIndex}
+                    className="qf-sub"
+                    x={x + NODE_W / 2}
+                    y={y + 40 + lineIndex * 12}
+                    textAnchor="middle"
+                  >
+                    {line}
+                  </text>
+                ))}
+              </g>
+            );
+          }
           return (
             <g
               key={`${step.where}-${index}`}
+              className="qf-enter"
+              style={{ ['--qf-delay' as string]: `${enterDelay(index)}ms` }}
               data-kind={nodeKind(step, handling)}
               data-flow-step={index}
               data-active={activeStepIndex === index}
