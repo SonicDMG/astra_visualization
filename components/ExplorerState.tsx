@@ -581,6 +581,7 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
       <LiveTracePanel />
       <div className="flex flex-1 min-h-0">
         <div className="flex flex-col flex-1 min-w-0 min-h-0 gap-2 p-4">
+          <div className="flex flex-col gap-2 flex-shrink-0 overflow-y-auto" style={{ maxHeight: '55%' }}>
       {error && (
         <div
           role="alert"
@@ -857,6 +858,7 @@ export default function ExplorerState({ keyspace, collection }: ExplorerStatePro
           onClose={() => setIsFilterOpen(false)}
         />
       )}
+          </div>
 
       <ResultsGrid
         documents={shownDocuments}
