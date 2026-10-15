@@ -2,7 +2,7 @@
 
 # 🔭 Astra Data Explorer
 
-**A beautiful, real-time GUI for browsing, querying, and editing your [DataStax Astra DB](https://www.datastax.com/products/datastax-astra) collections.**
+**A real-time GUI for browsing, querying, and editing your [DataStax Astra DB](https://www.datastax.com/products/datastax-astra) collections — with Vector, Lexical (BM25), and Hybrid search, and a live, animated trace of every request from browser to database.**
 
 [![Next.js](https://img.shields.io/badge/Next.js-16.4-black?logo=next.js&logoColor=white)](https://nextjs.org/)
 [![React](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=white)](https://react.dev/)
@@ -10,7 +10,7 @@
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind-4-38bdf8?logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-![Astra Data Explorer Screenshot](docs/screenshot.png)
+![Astra Data Explorer](docs/hero.png)
 
 </div>
 
@@ -21,7 +21,7 @@
 | Feature | Description |
 |---|---|
 | 🗂 **Keyspace & Collection Browser** | Navigate all your Astra keyspaces and collections from a collapsible sidebar. Capability badges call out **Vector**, **Vectorize**, **Lexical**, and **Rerank** collections at a glance. |
-| 🔍 **Multi-mode Search** | Switch between **Browse** (paginated scan), **Vector Similarity** (ANN search with score), **Lexical** (full-text BM25), and **Hybrid** (vector + lexical fusion) — automatically offered only when the collection supports them. |
+| 🔍 **Multi-mode Search** | Switch between **Browse** (paginated scan), **Semantic** (ANN vector search, text or raw vector), **Keyword** (full-text BM25), and **Hybrid** (combined vector + lexical, reranked) — see [Search Modes](#search-modes) below. Modes are offered only when the collection supports them. |
 | 🧩 **Visual Filter Builder** | Build `$and` / `$or` filter trees with a point-and-click UI. Every clause is shown as a readable chip; no JSON required. |
 | 📊 **Virtualized Results Grid** | Handles large documents with a column-resizable, sort-clickable, horizontally scrollable data grid powered by TanStack Table and TanStack Virtual. |
 | ✏️ **Inline Field Editing** | Click any cell in the row detail panel to edit scalar and JSON fields in place, with datatype validation, optimistic UI, and full live-trace support. |
@@ -31,9 +31,20 @@
 
 ---
 
-## 🖥 Demo
+## 🔍 Search Modes
 
-> **Coming soon** — deploy your own instance in under 2 minutes using the guide below.
+Astra Data API gives a collection up to four ways to be queried, depending on what it's indexed for. Astra Data Explorer exposes all of them as tabs in the search bar — it only offers the modes a collection actually supports, and compiles each one to the matching Data API request.
+
+| Mode | Data API shape | Needs | Synthetic score fields |
+|---|---|---|---|
+| **Browse** | `find` with no `sort` | Any collection | — |
+| **Semantic** | `find` — `sort: { $vectorize: "text" }` or `sort: { $vector: [...] }` | A `$vector` index, plus a vectorize service for text queries (or paste a raw vector) | `$similarity` |
+| **Keyword** | `find` — `sort: { $lexical: "text" }` | A `$lexical` (BM25 full-text) index | — |
+| **Hybrid** | `findAndRerank` — `sort: { $hybrid: "text" }` | `$vector` + `$lexical` + a rerank service | `$rerank`, `$vectorScore`, `$lexicalScore` |
+
+**Hybrid is the most comprehensive mode**: a single query string feeds both the `$vectorize` (semantic) and `$lexical` (BM25) rankers in one `findAndRerank` call, Astra runs both searches, and a cross-encoder reranks the combined candidates. Astra Data Explorer surfaces every component score — rerank, vector, and lexical — as its own column, right next to the live trace of the two-step request that produced them:
+
+![Hybrid search in Astra Data Explorer, with the Live Trace panel open](docs/hybrid-search-demo.gif)
 
 ---
 
@@ -140,7 +151,7 @@ Click **Live Trace** in the header to open the trace panel. Every query emits a 
 2. **App Server** — Next.js route handler validates and translates the request
 3. **Astra Data API** — the actual Data API call with method, endpoint, and round-trip time
 
-The animated **Query Flow Diagram** draws a swimlane architecture diagram in real time, colour-coding each step by its type (frontend / backend / database / cloud / security). Click any card to inspect the raw request/response JSON.
+The animated **Query Flow Diagram** draws a swimlane architecture diagram in real time, colour-coding each step by its type (frontend / backend / database / cloud / security). Click any card to inspect the raw request/response JSON — see it in action in the [Hybrid search example above](#search-modes).
 
 ---
 
@@ -148,10 +159,10 @@ The animated **Query Flow Diagram** draws a swimlane architecture diagram in rea
 
 | Badge | Capability | Search Modes Available |
 |---|---|---|
-| 🔵 **Vector** | Native `$vector` field + ANN index | Browse, Vector Similarity |
-| 🟣 **Vectorize** | Auto-embedding via a cloud model | Browse, Vector Similarity (text query) |
-| 🟢 **Lexical** | BM25 full-text index | Browse, Lexical |
-| 🟠 **Rerank** | Cross-encoder re-ranking | Browse, Hybrid |
+| 🔵 **Vector** | Native `$vector` field + ANN index | Browse, Semantic (paste a vector) |
+| 🟣 **Vectorize** | Auto-embedding via a cloud model | Browse, Semantic (text query) |
+| 🟢 **Lexical** | BM25 full-text index | Browse, Keyword |
+| 🟠 **Rerank** | Cross-encoder re-ranking (needs Vector + Lexical too) | Browse, Hybrid |
 | _(none)_ | Standard JSON collection | Browse only |
 
 ---
